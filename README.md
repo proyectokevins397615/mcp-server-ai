@@ -2,9 +2,9 @@
 
 **Microservicio empresarial de alta performance para integración con múltiples proveedores de IA**
 
-[![CI/CD](https://github.com/tu-usuario/mcp-server-ai/workflows/CI/CD%20Pipeline/badge.svg)](https://github.com/tu-usuario/mcp-server-ai/actions)
-[![Security](https://github.com/tu-usuario/mcp-server-ai/workflows/Security%20Scan/badge.svg)](https://github.com/tu-usuario/mcp-server-ai/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/tu-usuario/mcp-server-ai)](https://goreportcard.com/report/github.com/tu-usuario/mcp-server-ai)
+[![CI/CD](https://github.com/proyectokevins397615/mcp-server-ai/workflows/CI/CD%20Pipeline/badge.svg)](https://github.com/proyectokevins397615/mcp-server-ai/actions)
+[![Security](https://github.com/proyectokevins397615/mcp-server-ai/workflows/Security%20Scan/badge.svg)](https://github.com/proyectokevins397615/mcp-server-ai/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/proyectokevins397615/mcp-server-ai)](https://goreportcard.com/report/github.com/proyectokevins397615/mcp-server-ai)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 📋 Descripción
@@ -139,7 +139,7 @@ graph TB
 
 ```bash
 # 1. Clonar el repositorio
-git clone https://github.com/tu-usuario/mcp-server-ai.git
+git clone https://github.com/proyectokevins397615/mcp-server-ai.git
 cd mcp-server-ai
 
 # 2. Configurar variables de entorno
@@ -1657,7 +1657,7 @@ Este proyecto está licenciado bajo la Licencia MIT. Ver el archivo [LICENSE](LI
 **1. Fork y Clone**:
 
 ```bash
-git clone https://github.com/tu-usuario/mcp-server-ai.git
+git clone https://github.com/proyectokevins397615/mcp-server-ai.git
 cd mcp-server-ai
 ```
 
@@ -1724,8 +1724,8 @@ git push origin feature/nueva-funcionalidad
 - 📧 **Email**: support@mcp-server-ai.com
 - 💬 **Discord**: [discord.gg/mcp-server](https://discord.gg/mcp-server)
 - 📖 **Documentación**: [DEPLOYMENT.md](DEPLOYMENT.md)
-- 🐛 **Issues**: [GitHub Issues](https://github.com/tu-usuario/mcp-server-ai/issues)
-- 📋 **Discussions**: [GitHub Discussions](https://github.com/tu-usuario/mcp-server-ai/discussions)
+- 🐛 **Issues**: [GitHub Issues](https://github.com/proyectokevins397615/mcp-server-ai/issues)
+- 📋 **Discussions**: [GitHub Discussions](https://github.com/proyectokevins397615/mcp-server-ai/discussions)
 
 ### FAQ
 
@@ -1801,6 +1801,6 @@ curl http://localhost:8090/health
 
 **Hecho con ❤️ para la comunidad de desarrolladores**
 
-[⭐ Star en GitHub](https://github.com/tu-usuario/mcp-server-ai) | [🐛 Reportar Bug](https://github.com/tu-usuario/mcp-server-ai/issues) | [💬 Discusiones](https://github.com/tu-usuario/mcp-server-ai/discussions)
+[⭐ Star en GitHub](https://github.com/proyectokevins397615/mcp-server-ai) | [🐛 Reportar Bug](https://github.com/proyectokevins397615/mcp-server-ai/issues) | [💬 Discusiones](https://github.com/proyectokevins397615/mcp-server-ai/discussions)
 
 </div>

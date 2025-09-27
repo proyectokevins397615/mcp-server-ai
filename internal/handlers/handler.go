@@ -469,6 +469,10 @@ func (h *Handler) GenerateStreamHTTP(c *gin.Context) {
 	// Canal para chunks
 	chunks := make(chan *ai.StreamChunk, 100)
 
+	// Variables para rastrear contenido completo y detectar cache
+	var fullContent strings.Builder
+	var startTime = time.Now()
+
 	// Generar con streaming
 	go func() {
 		err := h.aiManager.StreamGenerate(c.Request.Context(), &req, chunks)
@@ -485,8 +489,65 @@ func (h *Handler) GenerateStreamHTTP(c *gin.Context) {
 				return false
 			}
 
-			data, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			// Construir contenido completo
+			if !chunk.Finished {
+				fullContent.WriteString(chunk.Content)
+			}
+
+			// Si es el último chunk, agregar información de tokens
+			if chunk.Finished {
+				duration := time.Since(startTime)
+				// Detectar cache basándose en duración muy rápida (< 1 segundo para streaming simulado)
+				isCached := duration < 1000*time.Millisecond
+
+				// Crear información de tokens
+				var tokenInfo map[string]interface{}
+
+				if isCached {
+					estimatedTokens := len(fullContent.String()) / 4
+					if estimatedTokens < 1 {
+						estimatedTokens = 1
+					}
+					tokenInfo = map[string]interface{}{
+						"completion_tokens":       0,
+						"prompt_tokens":           0,
+						"completion_tokens_cache": estimatedTokens * 3 / 4,
+						"prompt_tokens_cache":     len(req.Prompt) / 4,
+						"cached":                  true,
+						"provider":                "cache",
+						"model":                   req.Model,
+						"duration_ms":             duration.Milliseconds(),
+					}
+				} else {
+					estimatedTokens := len(fullContent.String()) / 4
+					if estimatedTokens < 1 {
+						estimatedTokens = 1
+					}
+					tokenInfo = map[string]interface{}{
+						"completion_tokens":       estimatedTokens * 3 / 4,
+						"prompt_tokens":           len(req.Prompt) / 4,
+						"completion_tokens_cache": 0,
+						"prompt_tokens_cache":     0,
+						"cached":                  false,
+						"provider":                req.Provider,
+						"model":                   req.Model,
+						"duration_ms":             duration.Milliseconds(),
+					}
+				}
+
+				// Crear chunk modificado con información de tokens
+				modifiedChunk := *chunk
+				if tokenInfoJSON, err := json.Marshal(tokenInfo); err == nil {
+					modifiedChunk.Content = string(tokenInfoJSON)
+				}
+
+				data, _ := json.Marshal(modifiedChunk)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+			} else {
+				data, _ := json.Marshal(chunk)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+			}
+
 			return true
 
 		case <-c.Request.Context().Done():
