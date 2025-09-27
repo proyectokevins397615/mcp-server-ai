@@ -149,10 +149,13 @@ cp .env.example .env
 # 3. Instalar dependencias
 go mod download
 
-# 4. Generar código protobuf (opcional, ya incluido)
+# 4. instalar dependencias
+go mod tidy
+
+# 5. Generar código protobuf (opcional, ya incluido)
 protoc --go_out=. --go-grpc_out=. internal/proto/ai_service.proto
 
-# 5. Ejecutar en modo desarrollo
+# 6. Ejecutar en modo desarrollo
 go run cmd/server/main.go -debug -http=8090 -ws=8091 -grpc=50051
 ```
 
