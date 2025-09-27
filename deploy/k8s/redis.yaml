@@ -1,0 +1,509 @@
+# ===========================================
+# Deployment para Redis
+# Cache distribuido para MCP Server AI
+# ===========================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-deployment
+  namespace: mcp-server
+  labels:
+    app: redis
+    component: cache
+    version: v7.2.0
+  annotations:
+    description: "Deployment de Redis para cache distribuido"
+spec:
+  # ===========================================
+  # Configuración de réplicas
+  # ===========================================
+  replicas: 1  # Para producción, considerar Redis Cluster
+  
+  strategy:
+    type: Recreate  # Redis no soporta rolling updates con persistencia
+  
+  selector:
+    matchLabels:
+      app: redis
+      component: cache
+  
+  template:
+    metadata:
+      labels:
+        app: redis
+        component: cache
+        version: v7.2.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+        prometheus.io/path: "/metrics"
+    
+    spec:
+      # ===========================================
+      # Configuración de seguridad
+      # ===========================================
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      
+      # ===========================================
+      # Contenedores
+      # ===========================================
+      containers:
+        # Contenedor principal de Redis
+        - name: redis
+          image: redis:7.2-alpine
+          imagePullPolicy: IfNotPresent
+          
+          # ===========================================
+          # Comando con configuración personalizada
+          # ===========================================
+          command:
+            - redis-server
+            - /etc/redis/redis.conf
+          
+          # ===========================================
+          # Puertos
+          # ===========================================
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          
+          # ===========================================
+          # Variables de entorno
+          # ===========================================
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretRef:
+                  name: mcp-server-secrets
+                  key: REDIS_PASSWORD
+          
+          # ===========================================
+          # Recursos
+          # ===========================================
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          
+          # ===========================================
+          # Probes de salud
+          # ===========================================
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - --no-auth-warning
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - --no-auth-warning
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          
+          # ===========================================
+          # Volúmenes montados
+          # ===========================================
+          volumeMounts:
+            - name: redis-config
+              mountPath: /etc/redis
+              readOnly: true
+            - name: redis-data
+              mountPath: /data
+            - name: redis-logs
+              mountPath: /var/log/redis
+          
+          # ===========================================
+          # Configuración de seguridad del contenedor
+          # ===========================================
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 999
+            capabilities:
+              drop:
+                - ALL
+        
+        # Contenedor de métricas para Prometheus
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.55.0
+          imagePullPolicy: IfNotPresent
+          
+          ports:
+            - name: metrics
+              containerPort: 9121
+              protocol: TCP
+          
+          env:
+            - name: REDIS_ADDR
+              value: "redis://localhost:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretRef:
+                  name: mcp-server-secrets
+                  key: REDIS_PASSWORD
+          
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+          
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      
+      # ===========================================
+      # Volúmenes
+      # ===========================================
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+            defaultMode: 0644
+        
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-pvc
+        
+        - name: redis-logs
+          emptyDir:
+            sizeLimit: 100Mi
+      
+      # ===========================================
+      # Configuración adicional
+      # ===========================================
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+
+---
+# ===========================================
+# ConfigMap para configuración de Redis
+# ===========================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: mcp-server
+  labels:
+    app: redis
+    component: cache
+data:
+  redis.conf: |
+    # ===========================================
+    # Configuración de Redis para producción
+    # ===========================================
+    
+    # Configuración de red
+    bind 0.0.0.0
+    port 6379
+    tcp-backlog 511
+    tcp-keepalive 300
+    timeout 0
+    
+    # Configuración de autenticación
+    requirepass ${REDIS_PASSWORD}
+    
+    # Configuración de memoria
+    maxmemory 1gb
+    maxmemory-policy allkeys-lru
+    maxmemory-samples 5
+    
+    # Configuración de persistencia
+    save 900 1
+    save 300 10
+    save 60 10000
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+    dbfilename dump.rdb
+    dir /data
+    
+    # Configuración de AOF
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    aof-load-truncated yes
+    aof-use-rdb-preamble yes
+    
+    # Configuración de logging
+    loglevel notice
+    logfile /var/log/redis/redis.log
+    syslog-enabled no
+    
+    # Configuración de base de datos
+    databases 16
+    
+    # Configuración de cliente
+    client-output-buffer-limit normal 0 0 0
+    client-output-buffer-limit replica 256mb 64mb 60
+    client-output-buffer-limit pubsub 32mb 8mb 60
+    client-query-buffer-limit 1gb
+    
+    # Configuración de rendimiento
+    hz 10
+    dynamic-hz yes
+    aof-rewrite-incremental-fsync yes
+    rdb-save-incremental-fsync yes
+    
+    # Configuración de seguridad
+    protected-mode yes
+    rename-command FLUSHDB ""
+    rename-command FLUSHALL ""
+    rename-command DEBUG ""
+    rename-command CONFIG "CONFIG_b835c3f8a5d2e7c6"
+    
+    # Configuración de slow log
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+    
+    # Configuración de notificaciones
+    notify-keyspace-events ""
+
+---
+# ===========================================
+# PersistentVolumeClaim para Redis
+# ===========================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: mcp-server
+  labels:
+    app: redis
+    component: cache
+  annotations:
+    description: "Almacenamiento persistente para datos de Redis"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  
+  resources:
+    requests:
+      storage: 10Gi
+  
+  # Clase de almacenamiento (ajustar según el proveedor)
+  storageClassName: fast-ssd  # gp2 para AWS, managed-premium para Azure
+  
+  # Selector de volumen (opcional)
+  # selector:
+  #   matchLabels:
+  #     app: redis
+
+---
+# ===========================================
+# Service para Redis
+# ===========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: mcp-server
+  labels:
+    app: redis
+    component: cache
+  annotations:
+    description: "Service para Redis cache"
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9121"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  
+  selector:
+    app: redis
+    component: cache
+  
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP
+    
+    - name: metrics
+      port: 9121
+      targetPort: metrics
+      protocol: TCP
+  
+  sessionAffinity: None
+
+---
+# ===========================================
+# ServiceMonitor para métricas de Redis
+# ===========================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: redis-servicemonitor
+  namespace: mcp-server
+  labels:
+    app: redis
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+      scrapeTimeout: 10s
+      
+      metricRelabelings:
+        # Mantener solo métricas importantes
+        - sourceLabels: [__name__]
+          regex: 'redis_connected_clients|redis_used_memory_bytes|redis_keyspace_hits_total|redis_keyspace_misses_total|redis_commands_processed_total'
+          action: keep
+
+---
+# ===========================================
+# PrometheusRule para alertas de Redis
+# ===========================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: redis-alerts
+  namespace: mcp-server
+  labels:
+    app: redis
+    component: alerting
+spec:
+  groups:
+    - name: redis-alerts
+      interval: 30s
+      rules:
+        # Alerta cuando Redis está caído
+        - alert: RedisDown
+          expr: |
+            up{job="redis-service"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            component: cache
+          annotations:
+            summary: "Redis está caído"
+            description: "Redis no está respondiendo en el namespace {{ $labels.namespace }}"
+        
+        # Alerta cuando el uso de memoria es alto
+        - alert: RedisHighMemoryUsage
+          expr: |
+            (redis_used_memory_bytes / redis_config_maxmemory) * 100 > 90
+          for: 5m
+          labels:
+            severity: warning
+            component: cache
+          annotations:
+            summary: "Uso alto de memoria en Redis"
+            description: "Redis está usando {{ $value }}% de la memoria configurada"
+        
+        # Alerta cuando hay muchas conexiones
+        - alert: RedisHighConnections
+          expr: |
+            redis_connected_clients > 100
+          for: 5m
+          labels:
+            severity: warning
+            component: cache
+          annotations:
+            summary: "Muchas conexiones a Redis"
+            description: "Redis tiene {{ $value }} conexiones activas"
+        
+        # Alerta cuando la tasa de hit del cache es baja
+        - alert: RedisLowHitRate
+          expr: |
+            (rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m]))) * 100 < 80
+          for: 10m
+          labels:
+            severity: warning
+            component: cache
+          annotations:
+            summary: "Baja tasa de hit en Redis"
+            description: "La tasa de hit del cache es {{ $value }}%, menor al 80%"
+
+---
+# ===========================================
+# NetworkPolicy para Redis
+# ===========================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-network-policy
+  namespace: mcp-server
+  labels:
+    app: redis
+    component: security
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Permitir conexiones desde MCP Server
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcp-server-ai
+      ports:
+        - protocol: TCP
+          port: 6379
+    
+    # Permitir scraping de métricas desde Prometheus
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9121
+  
+  egress:
+    # Permitir DNS
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

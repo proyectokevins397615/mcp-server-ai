@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "kevins-tools/mcp-server-ai/internal/proto";
+
+// Servicio de IA
+service AIService {
+    // Generar contenido
+    rpc Generate(GenerateRequest) returns (GenerateResponse);
+    
+    // Generar con streaming
+    rpc GenerateStream(GenerateRequest) returns (stream StreamChunk);
+    
+    // Listar modelos disponibles
+    rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+}
+
+// Request para generar contenido
+message GenerateRequest {
+    string prompt = 1;
+    string system_prompt = 2;
+    string model = 3;
+    string provider = 4;
+    int32 max_tokens = 5;
+    float temperature = 6;
+}
+
+// Response de generación
+message GenerateResponse {
+    string content = 1;
+    string model = 2;
+    string provider = 3;
+    int32 tokens_used = 4;
+    int64 duration = 5;
+    map<string, string> metadata = 6;
+}
+
+// Chunk de streaming
+message StreamChunk {
+    string content = 1;
+    int32 index = 2;
+    bool finished = 3;
+    int64 timestamp = 4;
+}
+
+// Request para listar modelos
+message ListModelsRequest {}
+
+// Response con lista de modelos
+message ListModelsResponse {
+    repeated Model models = 1;
+}
+
+// Modelo de IA
+message Model {
+    string id = 1;
+    string name = 2;
+    string provider = 3;
+    int32 max_tokens = 4;
+    string description = 5;
+    repeated string capabilities = 6;
+}

@@ -1,0 +1,245 @@
+# ===========================================
+# Docker Compose para Producción
+# Archivo de sobrescritura para ambiente productivo
+# Usar con: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# ===========================================
+version: "3.9"
+
+services:
+  # ===========================================
+  # Configuración de Producción para MCP Server
+  # ===========================================
+  mcp-server:
+    # Imagen de producción desde registro
+    image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_IMAGE:-mcp-server-ai}:${VERSION:-latest}
+
+    # Variables de entorno de producción
+    environment:
+      - SERVER_ENV=production
+      - LOG_LEVEL=warn
+      - ENABLE_DEBUG=false
+      - ENABLE_METRICS=true
+      - ENABLE_TRACING=true
+
+      # Configuración de seguridad
+      - ENABLE_TLS=true
+      - TLS_CERT_PATH=/etc/ssl/certs/server.crt
+      - TLS_KEY_PATH=/etc/ssl/private/server.key
+
+      # Límites de rate limiting
+      - RATE_LIMIT_ENABLED=true
+      - RATE_LIMIT_RPS=1000
+      - RATE_LIMIT_BURST=2000
+
+    # Montaje de certificados SSL
+    volumes:
+      - ./deploy/ssl/certs:/etc/ssl/certs:ro
+      - ./deploy/ssl/private:/etc/ssl/private:ro
+      - logs-data:/app/logs
+
+    # Configuración de recursos para producción
+    deploy:
+      mode: replicated
+      replicas: 3 # Múltiples réplicas para alta disponibilidad
+
+      # Estrategia de actualización
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+        max_failure_ratio: 0.3
+
+      # Política de reinicio
+      restart_policy:
+        condition: any
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+
+      # Recursos aumentados para producción
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+        reservations:
+          cpus: "2"
+          memory: 2G
+
+    # Logging para producción
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+        labels: "service=mcp-server,env=production"
+        tag: "mcp-server-{{.ID}}"
+
+  # ===========================================
+  # Redis en modo cluster para producción
+  # ===========================================
+  redis:
+    # Comando con configuración de producción
+    command: >
+      redis-server
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --requirepass ${REDIS_PASSWORD}
+      --tcp-backlog 511
+      --tcp-keepalive 300
+      --timeout 0
+      --databases 16
+
+    # Recursos aumentados
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "1"
+          memory: 1G
+
+  # ===========================================
+  # PostgreSQL con configuración de producción
+  # ===========================================
+  postgres:
+    # Variables adicionales de producción
+    environment:
+      - POSTGRES_DB=mcp_server
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --locale=es_ES.UTF-8
+      - PGDATA=/var/lib/postgresql/data/pgdata
+
+      # Configuración de rendimiento
+      - POSTGRES_MAX_CONNECTIONS=200
+      - POSTGRES_SHARED_BUFFERS=256MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=1GB
+      - POSTGRES_MAINTENANCE_WORK_MEM=64MB
+      - POSTGRES_CHECKPOINT_COMPLETION_TARGET=0.9
+      - POSTGRES_WAL_BUFFERS=16MB
+      - POSTGRES_DEFAULT_STATISTICS_TARGET=100
+      - POSTGRES_RANDOM_PAGE_COST=1.1
+      - POSTGRES_EFFECTIVE_IO_CONCURRENCY=200
+
+    # Volumen adicional para backups
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./backups/postgres:/backups
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+
+    # Recursos aumentados
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "1"
+          memory: 1G
+
+  # ===========================================
+  # Nginx con SSL y configuración de producción
+  # ===========================================
+  nginx:
+    # Variables de entorno
+    environment:
+      - NGINX_WORKER_PROCESSES=auto
+      - NGINX_WORKER_CONNECTIONS=2048
+
+    # Volúmenes adicionales para SSL
+    volumes:
+      - ./deploy/nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/sites:/etc/nginx/sites-enabled:ro
+      - ./deploy/ssl/certs:/etc/nginx/ssl/certs:ro
+      - ./deploy/ssl/private:/etc/nginx/ssl/private:ro
+      - ./deploy/ssl/dhparam.pem:/etc/nginx/ssl/dhparam.pem:ro
+      - logs-data:/var/log/nginx
+
+    # Configuración de despliegue
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  # ===========================================
+  # Prometheus con retención extendida
+  # ===========================================
+  prometheus:
+    # Comando con configuración de producción
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=10GB"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+
+    # Volúmenes con backup
+    volumes:
+      - ./deploy/prometheus/prometheus.prod.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+
+    # Recursos
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # ===========================================
+  # Grafana con plugins y dashboards
+  # ===========================================
+  grafana:
+    # Variables de entorno de producción
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_INSTALL_PLUGINS=redis-datasource,postgres-datasource,prometheus
+      - GF_SERVER_ROOT_URL=https://${DOMAIN_NAME}/grafana
+      - GF_SECURITY_COOKIE_SECURE=true
+      - GF_SECURITY_COOKIE_HTTPONLY=true
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+
+    # Volúmenes con dashboards predefinidos
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+    # Recursos
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+# Redes de producción con encriptación
+networks:
+  mcp-network:
+    driver: overlay
+    driver_opts:
+      encrypted: "true"
+    attachable: true
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

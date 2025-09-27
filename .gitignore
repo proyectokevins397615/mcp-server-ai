@@ -1,0 +1,39 @@
+# Archivos de configuración sensibles
+.env
+
+# Dependencias para Go
+go.sum
+
+# Archivos generados por compilación
+*.out
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Directorios de salida
+bin/
+build/
+
+# Archivos temporales de sistema operativo
+.DS_Store
+Thumbs.db
+*.swp
+
+# Archivos de logs
+*.log
+
+# Archivos temporales y de pruebas
+*.tmp
+*.test
+*.bak
+
+# Archivos comprimidos y empaquetados
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Otros archivos innecesarios
+grpcurl_$VERSION
+grpcurl_*.tar.gz

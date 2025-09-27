@@ -1,0 +1,353 @@
+# ===========================================
+# HorizontalPodAutoscaler para MCP Server AI
+# Escalado automático basado en CPU, memoria y métricas personalizadas
+# ===========================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mcp-server-hpa
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: autoscaling
+    version: v1.0.0
+  annotations:
+    description: "Escalado automático para MCP Server basado en múltiples métricas"
+    "kubernetes.io/managed-by": "kubectl"
+spec:
+  # ===========================================
+  # Configuración del target
+  # ===========================================
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mcp-server-deployment
+  
+  # ===========================================
+  # Límites de escalado
+  # ===========================================
+  minReplicas: 3    # Mínimo para alta disponibilidad
+  maxReplicas: 50   # Máximo para controlar costos
+  
+  # ===========================================
+  # Métricas para escalado
+  # ===========================================
+  metrics:
+    # Métrica de CPU
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # Escalar cuando CPU > 70%
+    
+    # Métrica de memoria
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80  # Escalar cuando memoria > 80%
+    
+    # Métrica personalizada: Requests por segundo
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "100"  # Escalar cuando RPS > 100 por pod
+    
+    # Métrica personalizada: Latencia promedio
+    - type: Pods
+      pods:
+        metric:
+          name: http_request_duration_seconds
+        target:
+          type: AverageValue
+          averageValue: "500m"  # Escalar cuando latencia > 500ms
+    
+    # Métrica personalizada: Cola de trabajos
+    - type: Pods
+      pods:
+        metric:
+          name: worker_pool_queue_size
+        target:
+          type: AverageValue
+          averageValue: "1000"  # Escalar cuando cola > 1000 trabajos
+  
+  # ===========================================
+  # Comportamiento de escalado
+  # ===========================================
+  behavior:
+    # Comportamiento al escalar hacia arriba
+    scaleUp:
+      stabilizationWindowSeconds: 60  # Esperar 60s antes de escalar
+      policies:
+        - type: Percent
+          value: 100    # Duplicar pods como máximo
+          periodSeconds: 60
+        - type: Pods
+          value: 5      # Agregar máximo 5 pods por vez
+          periodSeconds: 60
+      selectPolicy: Max  # Usar la política más agresiva
+    
+    # Comportamiento al escalar hacia abajo
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Esperar 5 minutos antes de reducir
+      policies:
+        - type: Percent
+          value: 50     # Reducir máximo 50% de pods
+          periodSeconds: 60
+        - type: Pods
+          value: 2      # Reducir máximo 2 pods por vez
+          periodSeconds: 60
+      selectPolicy: Min  # Usar la política más conservadora
+
+---
+# ===========================================
+# PodDisruptionBudget para MCP Server AI
+# Garantiza disponibilidad durante mantenimiento
+# ===========================================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mcp-server-pdb
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: availability
+    version: v1.0.0
+  annotations:
+    description: "Garantiza disponibilidad mínima durante actualizaciones y mantenimiento"
+spec:
+  # ===========================================
+  # Selector de pods
+  # ===========================================
+  selector:
+    matchLabels:
+      app: mcp-server-ai
+      component: backend
+  
+  # ===========================================
+  # Política de disrupción
+  # ===========================================
+  # Opción 1: Mínimo de pods disponibles
+  minAvailable: 2
+  
+  # Opción 2: Máximo de pods no disponibles (comentado)
+  # maxUnavailable: 1
+  
+  # ===========================================
+  # Configuración adicional
+  # ===========================================
+  # Tiempo máximo para esperar que un pod se vuelva disponible
+  unhealthyPodEvictionPolicy: AlwaysAllow
+
+---
+# ===========================================
+# VerticalPodAutoscaler para MCP Server AI
+# Recomendaciones automáticas de recursos
+# ===========================================
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: mcp-server-vpa
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: vpa
+    version: v1.0.0
+  annotations:
+    description: "Recomendaciones automáticas de CPU y memoria"
+spec:
+  # ===========================================
+  # Target del VPA
+  # ===========================================
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mcp-server-deployment
+  
+  # ===========================================
+  # Política de actualización
+  # ===========================================
+  updatePolicy:
+    updateMode: "Off"  # Solo recomendaciones, no aplicar automáticamente
+    # Opciones: "Off", "Initial", "Recreation", "Auto"
+  
+  # ===========================================
+  # Política de recursos
+  # ===========================================
+  resourcePolicy:
+    containerPolicies:
+      - containerName: mcp-server
+        # Límites mínimos
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        # Límites máximos
+        maxAllowed:
+          cpu: 8
+          memory: 16Gi
+        # Recursos controlados
+        controlledResources: ["cpu", "memory"]
+        # Valores controlados
+        controlledValues: RequestsAndLimits
+
+---
+# ===========================================
+# PodMonitor para métricas personalizadas
+# Usado por Prometheus para recopilar métricas del HPA
+# ===========================================
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mcp-server-podmonitor
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: monitoring
+spec:
+  # ===========================================
+  # Selector de pods
+  # ===========================================
+  selector:
+    matchLabels:
+      app: mcp-server-ai
+      component: backend
+  
+  # ===========================================
+  # Configuración de endpoints
+  # ===========================================
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+      
+      # Configuración de métricas
+      metricRelabelings:
+        # Mantener solo métricas relevantes para HPA
+        - sourceLabels: [__name__]
+          regex: 'http_requests_per_second|http_request_duration_seconds|worker_pool_queue_size'
+          action: keep
+        
+        # Agregar labels adicionales
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+
+---
+# ===========================================
+# ServiceMonitor para métricas de servicio
+# ===========================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mcp-server-servicemonitor
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: monitoring
+spec:
+  # ===========================================
+  # Selector de servicios
+  # ===========================================
+  selector:
+    matchLabels:
+      app: mcp-server-ai
+  
+  # ===========================================
+  # Configuración de endpoints
+  # ===========================================
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+      
+      # Timeout para scraping
+      scrapeTimeout: 10s
+      
+      # Configuración de TLS (si es necesario)
+      # tlsConfig:
+      #   insecureSkipVerify: true
+      
+      # Relabeling para métricas
+      metricRelabelings:
+        # Eliminar métricas innecesarias de Go runtime
+        - sourceLabels: [__name__]
+          regex: 'go_.*'
+          action: drop
+        
+        # Mantener solo métricas de aplicación
+        - sourceLabels: [__name__]
+          regex: 'mcp_.*|http_.*|grpc_.*|worker_.*'
+          action: keep
+
+---
+# ===========================================
+# PrometheusRule para alertas de escalado
+# ===========================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mcp-server-scaling-alerts
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: alerting
+spec:
+  groups:
+    - name: mcp-server-scaling
+      interval: 30s
+      rules:
+        # Alerta cuando HPA está escalando frecuentemente
+        - alert: MCPServerFrequentScaling
+          expr: |
+            increase(kube_hpa_status_current_replicas{hpa="mcp-server-hpa"}[10m]) > 5
+          for: 5m
+          labels:
+            severity: warning
+            component: autoscaling
+          annotations:
+            summary: "MCP Server está escalando frecuentemente"
+            description: "El HPA ha cambiado el número de réplicas más de 5 veces en los últimos 10 minutos"
+        
+        # Alerta cuando se alcanza el máximo de réplicas
+        - alert: MCPServerMaxReplicas
+          expr: |
+            kube_hpa_status_current_replicas{hpa="mcp-server-hpa"} >= kube_hpa_spec_max_replicas{hpa="mcp-server-hpa"}
+          for: 2m
+          labels:
+            severity: critical
+            component: autoscaling
+          annotations:
+            summary: "MCP Server ha alcanzado el máximo de réplicas"
+            description: "El servicio está en su capacidad máxima. Considere aumentar los límites o optimizar la aplicación"
+        
+        # Alerta cuando la latencia es alta
+        - alert: MCPServerHighLatency
+          expr: |
+            histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{service="mcp-server"}[5m])) > 1
+          for: 3m
+          labels:
+            severity: warning
+            component: performance
+          annotations:
+            summary: "Alta latencia en MCP Server"
+            description: "El percentil 95 de latencia es {{ $value }}s, mayor a 1 segundo"
+        
+        # Alerta cuando la cola de trabajos es muy grande
+        - alert: MCPServerHighQueueSize
+          expr: |
+            worker_pool_queue_size > 5000
+          for: 2m
+          labels:
+            severity: warning
+            component: performance
+          annotations:
+            summary: "Cola de trabajos muy grande en MCP Server"
+            description: "La cola tiene {{ $value }} trabajos pendientes"

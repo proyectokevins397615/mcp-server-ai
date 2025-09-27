@@ -1,0 +1,466 @@
+# ===========================================
+# Pipeline de CI/CD para MCP Server AI
+# GitHub Actions - Integración y Despliegue Continuo
+# ===========================================
+name: CI/CD Pipeline
+
+on:
+  # Triggers del pipeline
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, develop ]
+  
+  # Permitir ejecución manual
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Ambiente de despliegue'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      skip_tests:
+        description: 'Omitir tests'
+        required: false
+        default: false
+        type: boolean
+
+# Variables de entorno globales
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  GO_VERSION: '1.23'
+  DOCKER_BUILDKIT: 1
+
+# Configuración de permisos
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  actions: read
+
+jobs:
+  # ===========================================
+  # Job 1: Análisis de código y tests
+  # ===========================================
+  test:
+    name: 🧪 Tests y Análisis de Código
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+    
+    services:
+      # Redis para tests de integración
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      # PostgreSQL para tests de integración
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_USER: test_user
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Necesario para SonarCloud
+      
+      # Configurar Go
+      - name: 🔧 Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      
+      # Verificar formato del código
+      - name: 📝 Verificar formato
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "❌ Código no formateado correctamente:"
+            gofmt -s -l .
+            exit 1
+          fi
+          echo "✅ Código formateado correctamente"
+      
+      # Análisis estático con go vet
+      - name: 🔍 Análisis estático (go vet)
+        run: go vet ./...
+      
+      # Análisis de seguridad con gosec
+      - name: 🔒 Análisis de seguridad (gosec)
+        uses: securecodewarrior/github-action-gosec@master
+        with:
+          args: '-fmt sarif -out gosec-results.sarif ./...'
+        continue-on-error: true
+      
+      # Subir resultados de seguridad
+      - name: 📤 Subir resultados de seguridad
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: gosec-results.sarif
+      
+      # Instalar dependencias
+      - name: 📦 Instalar dependencias
+        run: go mod download
+      
+      # Generar código protobuf
+      - name: 🔄 Generar código protobuf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          protoc --go_out=. --go-grpc_out=. internal/proto/ai_service.proto
+      
+      # Ejecutar tests unitarios
+      - name: 🧪 Tests unitarios
+        env:
+          REDIS_URL: redis://localhost:6379/0
+          POSTGRES_URL: postgres://test_user:test_password@localhost:5432/test_db?sslmode=disable
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+      
+      # Ejecutar tests de integración
+      - name: 🔗 Tests de integración
+        env:
+          REDIS_URL: redis://localhost:6379/0
+          POSTGRES_URL: postgres://test_user:test_password@localhost:5432/test_db?sslmode=disable
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_REGION: us-east-1
+          AZURE_API_KEY: test
+          AZURE_RESOURCE_NAME: test
+          AZURE_ENDPOINT: https://test.azure.com/
+        run: |
+          go test -v -tags=integration ./tests/integration/...
+      
+      # Benchmarks
+      - name: ⚡ Benchmarks
+        run: |
+          go test -bench=. -benchmem ./internal/pool/...
+      
+      # Subir cobertura a Codecov
+      - name: 📊 Subir cobertura
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.out
+          flags: unittests
+          name: codecov-umbrella
+      
+      # Cache de dependencias Go
+      - name: 💾 Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+  # ===========================================
+  # Job 2: Build y Push de imagen Docker
+  # ===========================================
+  build:
+    name: 🐳 Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Configurar QEMU para builds multi-arquitectura
+      - name: 🔧 Configurar QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      # Configurar Docker Buildx
+      - name: 🔧 Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Login al registry
+      - name: 🔐 Login a Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # Extraer metadata
+      - name: 📋 Extraer metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+      
+      # Build y push de imagen
+      - name: 🏗️ Build y Push imagen
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            BUILD_TIME=${{ github.run_id }}
+            GIT_COMMIT=${{ github.sha }}
+      
+      # Generar SBOM (Software Bill of Materials)
+      - name: 📄 Generar SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+      
+      # Escaneo de vulnerabilidades con Trivy
+      - name: 🔍 Escaneo de vulnerabilidades
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      # Subir resultados de vulnerabilidades
+      - name: 📤 Subir resultados de vulnerabilidades
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      # Output de imagen
+      - name: 📝 Output imagen
+        id: image
+        run: echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}" >> $GITHUB_OUTPUT
+
+  # ===========================================
+  # Job 3: Despliegue a Staging
+  # ===========================================
+  deploy-staging:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && inputs.environment == 'staging')
+    environment: staging
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Configurar kubectl
+      - name: 🔧 Configurar kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      # Configurar conexión a Kubernetes
+      - name: 🔗 Configurar Kubernetes
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+          kubectl config current-context
+      
+      # Actualizar imagen en deployment
+      - name: 🔄 Actualizar deployment
+        env:
+          KUBECONFIG: kubeconfig
+        run: |
+          kubectl set image deployment/mcp-server-deployment \
+            mcp-server=${{ needs.build.outputs.image }} \
+            -n mcp-server-staging
+          
+          kubectl rollout status deployment/mcp-server-deployment \
+            -n mcp-server-staging --timeout=600s
+      
+      # Ejecutar tests de smoke
+      - name: 💨 Tests de smoke
+        env:
+          KUBECONFIG: kubeconfig
+        run: |
+          # Obtener IP del servicio
+          SERVICE_IP=$(kubectl get service mcp-server-service -n mcp-server-staging -o jsonpath='{.spec.clusterIP}')
+          
+          # Crear pod de test
+          kubectl run smoke-test --rm -i --tty --image=curlimages/curl --restart=Never -- \
+            curl -f http://$SERVICE_IP:8090/health
+      
+      # Notificar en Slack
+      - name: 📢 Notificar Slack
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+
+  # ===========================================
+  # Job 4: Despliegue a Producción
+  # ===========================================
+  deploy-production:
+    name: 🏭 Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [test, build]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.environment == 'production')
+    environment: production
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Configurar kubectl
+      - name: 🔧 Configurar kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      # Configurar Helm
+      - name: 🔧 Configurar Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+      
+      # Configurar conexión a Kubernetes
+      - name: 🔗 Configurar Kubernetes
+        run: |
+          echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > kubeconfig
+          export KUBECONFIG=kubeconfig
+          kubectl config current-context
+      
+      # Backup de base de datos antes del despliegue
+      - name: 💾 Backup base de datos
+        env:
+          KUBECONFIG: kubeconfig
+        run: |
+          kubectl exec -n mcp-server deployment/postgres-deployment -- \
+            pg_dump -U $POSTGRES_USER $POSTGRES_DB > backup-$(date +%Y%m%d-%H%M%S).sql
+      
+      # Despliegue con Helm
+      - name: 🚀 Despliegue con Helm
+        env:
+          KUBECONFIG: kubeconfig
+        run: |
+          helm upgrade --install mcp-server ./deploy/helm/mcp-server \
+            --namespace mcp-server \
+            --set image.repository=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }} \
+            --set image.tag=${{ needs.build.outputs.version }} \
+            --set environment=production \
+            --wait --timeout=10m
+      
+      # Ejecutar tests de smoke en producción
+      - name: 💨 Tests de smoke
+        env:
+          KUBECONFIG: kubeconfig
+        run: |
+          # Esperar a que el deployment esté listo
+          kubectl rollout status deployment/mcp-server-deployment -n mcp-server --timeout=600s
+          
+          # Obtener IP del servicio
+          SERVICE_IP=$(kubectl get service mcp-server-service -n mcp-server -o jsonpath='{.spec.clusterIP}')
+          
+          # Ejecutar tests
+          kubectl run prod-smoke-test --rm -i --tty --image=curlimages/curl --restart=Never -- \
+            /bin/sh -c "
+              curl -f http://$SERVICE_IP:8090/health &&
+              curl -f http://$SERVICE_IP:8090/api/v1/models
+            "
+      
+      # Crear release en GitHub
+      - name: 📦 Crear GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          body: |
+            ## 🚀 Nueva versión de MCP Server AI
+            
+            ### 📋 Cambios incluidos:
+            - Imagen Docker: `${{ needs.build.outputs.image }}`
+            - Digest: `${{ needs.build.outputs.digest }}`
+            
+            ### 🔗 Enlaces útiles:
+            - [Documentación](https://github.com/${{ github.repository }}/blob/main/README.md)
+            - [Changelog](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
+            
+            ### 🐳 Uso con Docker:
+            ```bash
+            docker pull ${{ needs.build.outputs.image }}
+            ```
+          draft: false
+          prerelease: false
+      
+      # Notificar en Slack
+      - name: 📢 Notificar Slack
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#deployments'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          fields: repo,message,commit,author,action,eventName,ref,workflow
+
+  # ===========================================
+  # Job 5: Cleanup de imágenes antiguas
+  # ===========================================
+  cleanup:
+    name: 🧹 Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    
+    steps:
+      # Limpiar imágenes antiguas del registry
+      - name: 🗑️ Limpiar imágenes antiguas
+        uses: actions/delete-package-versions@v4
+        with:
+          package-name: ${{ env.IMAGE_NAME }}
+          package-type: 'container'
+          min-versions-to-keep: 10
+          delete-only-untagged-versions: true

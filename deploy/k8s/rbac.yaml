@@ -1,0 +1,539 @@
+# ===========================================
+# ServiceAccount para MCP Server AI
+# Cuenta de servicio con permisos específicos
+# ===========================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-server-sa
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: security
+    version: v1.0.0
+  annotations:
+    description: "ServiceAccount para MCP Server con permisos mínimos necesarios"
+    "kubernetes.io/managed-by": "kubectl"
+automountServiceAccountToken: true
+
+---
+# ===========================================
+# ClusterRole para MCP Server AI
+# Define permisos a nivel de cluster
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-server-cluster-role
+  labels:
+    app: mcp-server-ai
+    component: security
+  annotations:
+    description: "Permisos de cluster para MCP Server"
+rules:
+  # ===========================================
+  # Permisos para leer información del cluster
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["get", "list", "watch"]
+  
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Permisos para métricas y monitoreo
+  # ===========================================
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  
+  # ===========================================
+  # Permisos para custom metrics (HPA)
+  # ===========================================
+  - apiGroups: ["custom.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+  
+  # ===========================================
+  # Permisos para external metrics
+  # ===========================================
+  - apiGroups: ["external.metrics.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list"]
+
+---
+# ===========================================
+# Role para MCP Server AI (namespace específico)
+# Define permisos dentro del namespace
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-server-role
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: security
+  annotations:
+    description: "Permisos específicos del namespace para MCP Server"
+rules:
+  # ===========================================
+  # Permisos para pods
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["pods", "pods/status", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Permisos para servicios
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["services", "services/status"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Permisos para endpoints
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Permisos para configmaps y secrets (solo lectura)
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+  
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Permisos para eventos
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  
+  # ===========================================
+  # Permisos para deployments
+  # ===========================================
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/status"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Permisos para replicasets
+  # ===========================================
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "replicasets/status"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Permisos para HPA
+  # ===========================================
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers", "horizontalpodautoscalers/status"]
+    verbs: ["get", "list", "watch"]
+  
+  # ===========================================
+  # Permisos para ingress
+  # ===========================================
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingresses/status"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ===========================================
+# ClusterRoleBinding para MCP Server AI
+# Vincula el ClusterRole con el ServiceAccount
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mcp-server-cluster-binding
+  labels:
+    app: mcp-server-ai
+    component: security
+  annotations:
+    description: "Binding del ClusterRole para MCP Server"
+subjects:
+  - kind: ServiceAccount
+    name: mcp-server-sa
+    namespace: mcp-server
+roleRef:
+  kind: ClusterRole
+  name: mcp-server-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ===========================================
+# RoleBinding para MCP Server AI
+# Vincula el Role con el ServiceAccount
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-server-binding
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: security
+  annotations:
+    description: "Binding del Role para MCP Server en el namespace"
+subjects:
+  - kind: ServiceAccount
+    name: mcp-server-sa
+    namespace: mcp-server
+roleRef:
+  kind: Role
+  name: mcp-server-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ===========================================
+# ServiceAccount para monitoreo (Prometheus)
+# ===========================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus-sa
+  namespace: mcp-server
+  labels:
+    app: prometheus
+    component: monitoring
+  annotations:
+    description: "ServiceAccount para Prometheus con permisos de monitoreo"
+
+---
+# ===========================================
+# ClusterRole para Prometheus
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-cluster-role
+  labels:
+    app: prometheus
+    component: monitoring
+rules:
+  # ===========================================
+  # Permisos para descubrimiento de servicios
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/proxy", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  
+  # ===========================================
+  # Permisos para métricas
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+  
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+
+---
+# ===========================================
+# ClusterRoleBinding para Prometheus
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-cluster-binding
+  labels:
+    app: prometheus
+    component: monitoring
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-sa
+    namespace: mcp-server
+roleRef:
+  kind: ClusterRole
+  name: prometheus-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ===========================================
+# ServiceAccount para Grafana
+# ===========================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: grafana-sa
+  namespace: mcp-server
+  labels:
+    app: grafana
+    component: monitoring
+  annotations:
+    description: "ServiceAccount para Grafana"
+
+---
+# ===========================================
+# Role para Grafana
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: grafana-role
+  namespace: mcp-server
+  labels:
+    app: grafana
+    component: monitoring
+rules:
+  # ===========================================
+  # Permisos básicos para Grafana
+  # ===========================================
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ===========================================
+# RoleBinding para Grafana
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: grafana-binding
+  namespace: mcp-server
+  labels:
+    app: grafana
+    component: monitoring
+subjects:
+  - kind: ServiceAccount
+    name: grafana-sa
+    namespace: mcp-server
+roleRef:
+  kind: Role
+  name: grafana-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ===========================================
+# NetworkPolicy para MCP Server AI
+# Controla el tráfico de red entre pods
+# ===========================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-server-network-policy
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: security
+  annotations:
+    description: "Política de red para MCP Server - controla tráfico entrante y saliente"
+spec:
+  # ===========================================
+  # Selector de pods afectados
+  # ===========================================
+  podSelector:
+    matchLabels:
+      app: mcp-server-ai
+  
+  # ===========================================
+  # Tipos de política
+  # ===========================================
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  # ===========================================
+  # Reglas de tráfico entrante
+  # ===========================================
+  ingress:
+    # Permitir tráfico desde el ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8090
+        - protocol: TCP
+          port: 8091
+        - protocol: TCP
+          port: 50051
+    
+    # Permitir tráfico desde Prometheus
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9090
+    
+    # Permitir tráfico interno entre pods del mismo namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: mcp-server
+      ports:
+        - protocol: TCP
+          port: 8090
+        - protocol: TCP
+          port: 8091
+        - protocol: TCP
+          port: 50051
+  
+  # ===========================================
+  # Reglas de tráfico saliente
+  # ===========================================
+  egress:
+    # Permitir conexiones a Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    
+    # Permitir conexiones a PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    
+    # Permitir conexiones DNS
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    
+    # Permitir conexiones HTTPS para APIs externas (AWS, Azure)
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 443
+    
+    # Permitir conexiones HTTP para health checks
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 80
+
+---
+# ===========================================
+# PodSecurityPolicy para MCP Server AI
+# Define políticas de seguridad para los pods
+# ===========================================
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: mcp-server-psp
+  labels:
+    app: mcp-server-ai
+    component: security
+  annotations:
+    description: "Política de seguridad para pods de MCP Server"
+spec:
+  # ===========================================
+  # Configuración de privilegios
+  # ===========================================
+  privileged: false
+  allowPrivilegeEscalation: false
+  
+  # ===========================================
+  # Capacidades permitidas
+  # ===========================================
+  requiredDropCapabilities:
+    - ALL
+  allowedCapabilities:
+    - NET_BIND_SERVICE
+  
+  # ===========================================
+  # Configuración de volúmenes
+  # ===========================================
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+  
+  # ===========================================
+  # Configuración de filesystem
+  # ===========================================
+  readOnlyRootFilesystem: false
+  
+  # ===========================================
+  # Configuración de usuario
+  # ===========================================
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  runAsGroup:
+    rule: 'MustRunAs'
+    ranges:
+      - min: 1000
+        max: 65535
+  
+  # ===========================================
+  # Configuración de SELinux
+  # ===========================================
+  seLinux:
+    rule: 'RunAsAny'
+  
+  # ===========================================
+  # Configuración de fsGroup
+  # ===========================================
+  fsGroup:
+    rule: 'RunAsAny'
+
+---
+# ===========================================
+# ClusterRole para usar PodSecurityPolicy
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-server-psp-role
+  labels:
+    app: mcp-server-ai
+    component: security
+rules:
+  - apiGroups: ['policy']
+    resources: ['podsecuritypolicies']
+    verbs: ['use']
+    resourceNames:
+      - mcp-server-psp
+
+---
+# ===========================================
+# ClusterRoleBinding para PodSecurityPolicy
+# ===========================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mcp-server-psp-binding
+  labels:
+    app: mcp-server-ai
+    component: security
+subjects:
+  - kind: ServiceAccount
+    name: mcp-server-sa
+    namespace: mcp-server
+roleRef:
+  kind: ClusterRole
+  name: mcp-server-psp-role
+  apiGroup: rbac.authorization.k8s.io

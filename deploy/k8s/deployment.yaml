@@ -1,0 +1,353 @@
+# ===========================================
+# Deployment para MCP Server AI
+# Configuración de alta disponibilidad para producción
+# ===========================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server-deployment
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: backend
+    version: v1.0.0
+    environment: production
+  annotations:
+    description: "Deployment principal del servidor MCP con IA"
+    "kubernetes.io/change-cause": "Versión inicial del deployment"
+spec:
+  # ===========================================
+  # Estrategia de despliegue
+  # ===========================================
+  replicas: 3  # Número de réplicas para alta disponibilidad
+  
+  strategy:
+    type: RollingUpdate  # Actualización gradual sin downtime
+    rollingUpdate:
+      maxSurge: 1        # Máximo de pods adicionales durante actualización
+      maxUnavailable: 0  # No permitir pods no disponibles durante actualización
+  
+  revisionHistoryLimit: 10  # Mantener historial de 10 revisiones
+  
+  # ===========================================
+  # Selector de pods
+  # ===========================================
+  selector:
+    matchLabels:
+      app: mcp-server-ai
+      component: backend
+  
+  # ===========================================
+  # Template del Pod
+  # ===========================================
+  template:
+    metadata:
+      labels:
+        app: mcp-server-ai
+        component: backend
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    
+    spec:
+      # ===========================================
+      # Configuración de seguridad del Pod
+      # ===========================================
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      
+      # ===========================================
+      # Service Account
+      # ===========================================
+      serviceAccountName: mcp-server-sa
+      
+      # ===========================================
+      # Configuración de DNS
+      # ===========================================
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
+          - name: edns0
+      
+      # ===========================================
+      # Tolerations para nodos específicos
+      # ===========================================
+      tolerations:
+        - key: "node-role.kubernetes.io/master"
+          operator: "Equal"
+          value: "true"
+          effect: "NoSchedule"
+      
+      # ===========================================
+      # Affinity y Anti-Affinity
+      # ===========================================
+      affinity:
+        # Anti-afinidad para distribuir pods en diferentes nodos
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - mcp-server-ai
+                topologyKey: kubernetes.io/hostname
+        
+        # Afinidad con nodos de producción
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-type
+                    operator: In
+                    values:
+                      - production
+                      - compute-optimized
+      
+      # ===========================================
+      # Init Containers
+      # ===========================================
+      initContainers:
+        # Verificar conectividad con Redis
+        - name: wait-for-redis
+          image: busybox:1.35
+          command: ['sh', '-c']
+          args:
+            - |
+              echo "Esperando a que Redis esté disponible..."
+              until nc -z redis-service.mcp-server.svc.cluster.local 6379; do
+                echo "Redis no está listo - esperando..."
+                sleep 2
+              done
+              echo "Redis está disponible!"
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "50m"
+        
+        # Verificar conectividad con PostgreSQL
+        - name: wait-for-postgres
+          image: busybox:1.35
+          command: ['sh', '-c']
+          args:
+            - |
+              echo "Esperando a que PostgreSQL esté disponible..."
+              until nc -z postgres-service.mcp-server.svc.cluster.local 5432; do
+                echo "PostgreSQL no está listo - esperando..."
+                sleep 2
+              done
+              echo "PostgreSQL está disponible!"
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "50m"
+      
+      # ===========================================
+      # Contenedor principal
+      # ===========================================
+      containers:
+        - name: mcp-server
+          image: ${DOCKER_REGISTRY:-docker.io}/${DOCKER_IMAGE:-mcp-server-ai}:${VERSION:-latest}
+          imagePullPolicy: Always
+          
+          # ===========================================
+          # Puertos expuestos
+          # ===========================================
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+            - name: websocket
+              containerPort: 8091
+              protocol: TCP
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          
+          # ===========================================
+          # Variables de entorno desde ConfigMap y Secrets
+          # ===========================================
+          envFrom:
+            - configMapRef:
+                name: mcp-server-config
+            - secretRef:
+                name: mcp-server-secrets
+          
+          # Variables de entorno adicionales
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+          
+          # ===========================================
+          # Probes de salud
+          # ===========================================
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 30
+          
+          # ===========================================
+          # Recursos
+          # ===========================================
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+              ephemeral-storage: "1Gi"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+              ephemeral-storage: "5Gi"
+          
+          # ===========================================
+          # Volúmenes montados
+          # ===========================================
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+            - name: scripts-volume
+              mountPath: /app/scripts
+              readOnly: true
+            - name: logs-volume
+              mountPath: /app/logs
+            - name: tmp-volume
+              mountPath: /tmp
+            - name: cache-volume
+              mountPath: /app/cache
+          
+          # ===========================================
+          # Configuración de seguridad del contenedor
+          # ===========================================
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+          
+          # ===========================================
+          # Lifecycle hooks
+          # ===========================================
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    echo "Iniciando graceful shutdown..."
+                    # Dar tiempo para que el load balancer deje de enviar tráfico
+                    sleep 15
+                    # Enviar señal de terminación al proceso
+                    kill -SIGTERM 1
+                    # Esperar a que termine
+                    sleep 10
+      
+      # ===========================================
+      # Volúmenes
+      # ===========================================
+      volumes:
+        - name: config-volume
+          configMap:
+            name: mcp-server-config
+            defaultMode: 0644
+        
+        - name: scripts-volume
+          configMap:
+            name: mcp-server-scripts
+            defaultMode: 0755
+        
+        - name: logs-volume
+          emptyDir:
+            sizeLimit: 1Gi
+        
+        - name: tmp-volume
+          emptyDir:
+            sizeLimit: 500Mi
+        
+        - name: cache-volume
+          emptyDir:
+            sizeLimit: 2Gi
+      
+      # ===========================================
+      # Image Pull Secrets
+      # ===========================================
+      imagePullSecrets:
+        - name: docker-registry-secret
+      
+      # ===========================================
+      # Configuración de reinicio
+      # ===========================================
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30

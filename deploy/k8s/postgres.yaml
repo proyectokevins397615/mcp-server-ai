@@ -1,0 +1,809 @@
+# ===========================================
+# Deployment para PostgreSQL
+# Base de datos principal para MCP Server AI
+# ===========================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-deployment
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: database
+    version: v16.1.0
+  annotations:
+    description: "Deployment de PostgreSQL para persistencia de datos"
+spec:
+  # ===========================================
+  # Configuración de réplicas
+  # ===========================================
+  replicas: 1  # Para producción, considerar PostgreSQL con réplicas
+  
+  strategy:
+    type: Recreate  # PostgreSQL no soporta rolling updates con persistencia
+  
+  selector:
+    matchLabels:
+      app: postgres
+      component: database
+  
+  template:
+    metadata:
+      labels:
+        app: postgres
+        component: database
+        version: v16.1.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+        prometheus.io/path: "/metrics"
+    
+    spec:
+      # ===========================================
+      # Configuración de seguridad
+      # ===========================================
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      
+      # ===========================================
+      # Init Container para inicialización
+      # ===========================================
+      initContainers:
+        - name: postgres-init
+          image: postgres:16-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Crear directorios necesarios
+              mkdir -p /var/lib/postgresql/data/pgdata
+              chown -R 999:999 /var/lib/postgresql/data
+              chmod 700 /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          securityContext:
+            runAsUser: 0  # Necesario para cambiar permisos
+      
+      # ===========================================
+      # Contenedores
+      # ===========================================
+      containers:
+        # Contenedor principal de PostgreSQL
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          
+          # ===========================================
+          # Puertos
+          # ===========================================
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          
+          # ===========================================
+          # Variables de entorno
+          # ===========================================
+          env:
+            - name: POSTGRES_DB
+              value: "mcp_server"
+            - name: POSTGRES_USER
+              valueFrom:
+                secretRef:
+                  name: mcp-server-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretRef:
+                  name: mcp-server-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+            - name: POSTGRES_INITDB_ARGS
+              value: "--encoding=UTF-8 --locale=es_ES.UTF-8"
+            
+            # Configuración de rendimiento
+            - name: POSTGRES_MAX_CONNECTIONS
+              value: "200"
+            - name: POSTGRES_SHARED_BUFFERS
+              value: "256MB"
+            - name: POSTGRES_EFFECTIVE_CACHE_SIZE
+              value: "1GB"
+            - name: POSTGRES_MAINTENANCE_WORK_MEM
+              value: "64MB"
+            - name: POSTGRES_CHECKPOINT_COMPLETION_TARGET
+              value: "0.9"
+            - name: POSTGRES_WAL_BUFFERS
+              value: "16MB"
+            - name: POSTGRES_DEFAULT_STATISTICS_TARGET
+              value: "100"
+            - name: POSTGRES_RANDOM_PAGE_COST
+              value: "1.1"
+            - name: POSTGRES_EFFECTIVE_IO_CONCURRENCY
+              value: "200"
+          
+          # ===========================================
+          # Recursos
+          # ===========================================
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          
+          # ===========================================
+          # Probes de salud
+          # ===========================================
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+            successThreshold: 1
+          
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" -h 127.0.0.1 -p 5432
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+            successThreshold: 1
+          
+          # ===========================================
+          # Volúmenes montados
+          # ===========================================
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-config
+              mountPath: /etc/postgresql
+              readOnly: true
+            - name: postgres-init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: postgres-logs
+              mountPath: /var/log/postgresql
+          
+          # ===========================================
+          # Configuración de seguridad del contenedor
+          # ===========================================
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 999
+            capabilities:
+              drop:
+                - ALL
+        
+        # Contenedor de métricas para Prometheus
+        - name: postgres-exporter
+          image: prometheuscommunity/postgres-exporter:v0.15.0
+          imagePullPolicy: IfNotPresent
+          
+          ports:
+            - name: metrics
+              containerPort: 9187
+              protocol: TCP
+          
+          env:
+            - name: DATA_SOURCE_NAME
+              valueFrom:
+                secretRef:
+                  name: mcp-server-secrets
+                  key: POSTGRES_URL
+            - name: PG_EXPORTER_EXTEND_QUERY_PATH
+              value: "/etc/postgres-exporter/queries.yaml"
+          
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "10m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          
+          volumeMounts:
+            - name: postgres-exporter-config
+              mountPath: /etc/postgres-exporter
+              readOnly: true
+      
+      # ===========================================
+      # Volúmenes
+      # ===========================================
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        
+        - name: postgres-config
+          configMap:
+            name: postgres-config
+            defaultMode: 0644
+        
+        - name: postgres-init-scripts
+          configMap:
+            name: postgres-init-scripts
+            defaultMode: 0755
+        
+        - name: postgres-exporter-config
+          configMap:
+            name: postgres-exporter-config
+            defaultMode: 0644
+        
+        - name: postgres-logs
+          emptyDir:
+            sizeLimit: 500Mi
+      
+      # ===========================================
+      # Configuración adicional
+      # ===========================================
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+
+---
+# ===========================================
+# ConfigMap para configuración de PostgreSQL
+# ===========================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: database
+data:
+  postgresql.conf: |
+    # ===========================================
+    # Configuración de PostgreSQL para producción
+    # ===========================================
+    
+    # Configuración de conexiones
+    listen_addresses = '*'
+    port = 5432
+    max_connections = 200
+    superuser_reserved_connections = 3
+    
+    # Configuración de memoria
+    shared_buffers = 256MB
+    effective_cache_size = 1GB
+    maintenance_work_mem = 64MB
+    checkpoint_completion_target = 0.9
+    wal_buffers = 16MB
+    default_statistics_target = 100
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    work_mem = 4MB
+    min_wal_size = 1GB
+    max_wal_size = 4GB
+    
+    # Configuración de logging
+    log_destination = 'stderr'
+    logging_collector = on
+    log_directory = '/var/log/postgresql'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_truncate_on_rotation = off
+    log_rotation_age = 1d
+    log_rotation_size = 10MB
+    log_min_messages = warning
+    log_min_error_statement = error
+    log_min_duration_statement = 1000
+    log_connections = on
+    log_disconnections = on
+    log_line_prefix = '%t [%p-%l] %q%u@%d '
+    log_lock_waits = on
+    log_statement = 'ddl'
+    log_temp_files = 10MB
+    log_checkpoints = on
+    log_autovacuum_min_duration = 0
+    
+    # Configuración de autovacuum
+    autovacuum = on
+    log_autovacuum_min_duration = 0
+    autovacuum_max_workers = 3
+    autovacuum_naptime = 1min
+    autovacuum_vacuum_threshold = 50
+    autovacuum_analyze_threshold = 50
+    autovacuum_vacuum_scale_factor = 0.2
+    autovacuum_analyze_scale_factor = 0.1
+    autovacuum_freeze_max_age = 200000000
+    autovacuum_multixact_freeze_max_age = 400000000
+    autovacuum_vacuum_cost_delay = 20ms
+    autovacuum_vacuum_cost_limit = 200
+    
+    # Configuración de WAL
+    wal_level = replica
+    fsync = on
+    synchronous_commit = on
+    wal_sync_method = fsync
+    full_page_writes = on
+    wal_compression = on
+    wal_log_hints = on
+    checkpoint_timeout = 5min
+    checkpoint_completion_target = 0.9
+    checkpoint_warning = 30s
+    
+    # Configuración de replicación
+    max_wal_senders = 10
+    max_replication_slots = 10
+    track_commit_timestamp = off
+    
+    # Configuración de estadísticas
+    track_activities = on
+    track_counts = on
+    track_io_timing = on
+    track_functions = none
+    stats_temp_directory = 'pg_stat_tmp'
+    
+    # Configuración de seguridad
+    ssl = off
+    password_encryption = scram-sha-256
+    
+    # Configuración de locale
+    lc_messages = 'es_ES.UTF-8'
+    lc_monetary = 'es_ES.UTF-8'
+    lc_numeric = 'es_ES.UTF-8'
+    lc_time = 'es_ES.UTF-8'
+    default_text_search_config = 'pg_catalog.spanish'
+    
+    # Configuración de timezone
+    timezone = 'UTC'
+    log_timezone = 'UTC'
+    
+    # Configuración adicional
+    shared_preload_libraries = 'pg_stat_statements'
+    pg_stat_statements.max = 10000
+    pg_stat_statements.track = all
+
+  pg_hba.conf: |
+    # ===========================================
+    # Configuración de autenticación PostgreSQL
+    # ===========================================
+    
+    # TYPE  DATABASE        USER            ADDRESS                 METHOD
+    
+    # "local" is for Unix domain socket connections only
+    local   all             all                                     trust
+    
+    # IPv4 local connections:
+    host    all             all             127.0.0.1/32            scram-sha-256
+    
+    # IPv6 local connections:
+    host    all             all             ::1/128                 scram-sha-256
+    
+    # Allow replication connections from localhost, by a user with the
+    # replication privilege.
+    local   replication     all                                     trust
+    host    replication     all             127.0.0.1/32            scram-sha-256
+    host    replication     all             ::1/128                 scram-sha-256
+    
+    # Conexiones desde pods en el cluster
+    host    all             all             10.0.0.0/8              scram-sha-256
+    host    all             all             172.16.0.0/12           scram-sha-256
+    host    all             all             192.168.0.0/16          scram-sha-256
+
+---
+# ===========================================
+# ConfigMap para scripts de inicialización
+# ===========================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: database
+data:
+  01-init-database.sql: |
+    -- ===========================================
+    -- Script de inicialización de la base de datos
+    -- ===========================================
+    
+    -- Crear extensiones necesarias
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+    CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+    CREATE EXTENSION IF NOT EXISTS "btree_gin";
+    
+    -- Configurar timezone
+    SET timezone = 'UTC';
+    
+    -- Crear esquemas
+    CREATE SCHEMA IF NOT EXISTS mcp_server;
+    CREATE SCHEMA IF NOT EXISTS monitoring;
+    
+    -- Configurar search_path
+    ALTER DATABASE mcp_server SET search_path TO mcp_server, public;
+    
+    -- Crear usuario de aplicación (si no existe)
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'mcp_app_user') THEN
+            CREATE ROLE mcp_app_user WITH LOGIN PASSWORD 'app_password_change_me';
+        END IF;
+    END
+    $$;
+    
+    -- Otorgar permisos
+    GRANT USAGE ON SCHEMA mcp_server TO mcp_app_user;
+    GRANT CREATE ON SCHEMA mcp_server TO mcp_app_user;
+    GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA mcp_server TO mcp_app_user;
+    GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA mcp_server TO mcp_app_user;
+    
+    -- Configurar permisos por defecto
+    ALTER DEFAULT PRIVILEGES IN SCHEMA mcp_server GRANT ALL ON TABLES TO mcp_app_user;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA mcp_server GRANT ALL ON SEQUENCES TO mcp_app_user;
+    
+    -- Crear tabla de ejemplo (si no existe)
+    CREATE TABLE IF NOT EXISTS mcp_server.health_check (
+        id SERIAL PRIMARY KEY,
+        timestamp TIMESTAMPTZ DEFAULT NOW(),
+        status TEXT NOT NULL,
+        details JSONB
+    );
+    
+    -- Insertar registro inicial
+    INSERT INTO mcp_server.health_check (status, details) 
+    VALUES ('initialized', '{"message": "Database initialized successfully"}')
+    ON CONFLICT DO NOTHING;
+
+  02-create-monitoring.sql: |
+    -- ===========================================
+    -- Script para configurar monitoreo
+    -- ===========================================
+    
+    -- Crear usuario para monitoreo
+    DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'postgres_exporter') THEN
+            CREATE ROLE postgres_exporter WITH LOGIN PASSWORD 'exporter_password_change_me';
+        END IF;
+    END
+    $$;
+    
+    -- Otorgar permisos mínimos para monitoreo
+    GRANT CONNECT ON DATABASE mcp_server TO postgres_exporter;
+    GRANT pg_monitor TO postgres_exporter;
+    
+    -- Crear vista para métricas personalizadas
+    CREATE OR REPLACE VIEW monitoring.custom_metrics AS
+    SELECT 
+        'mcp_server_sessions_total' as metric_name,
+        COUNT(*) as metric_value,
+        'Total number of active sessions' as metric_help
+    FROM pg_stat_activity 
+    WHERE state = 'active'
+    UNION ALL
+    SELECT 
+        'mcp_server_database_size_bytes' as metric_name,
+        pg_database_size(current_database()) as metric_value,
+        'Size of the database in bytes' as metric_help;
+    
+    -- Otorgar permisos en la vista
+    GRANT SELECT ON monitoring.custom_metrics TO postgres_exporter;
+
+---
+# ===========================================
+# ConfigMap para configuración del exporter
+# ===========================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-exporter-config
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: monitoring
+data:
+  queries.yaml: |
+    # ===========================================
+    # Consultas personalizadas para postgres_exporter
+    # ===========================================
+    
+    # Métricas de conexiones por base de datos
+    pg_database_connections:
+      query: |
+        SELECT 
+          datname as database,
+          count(*) as connections
+        FROM pg_stat_activity 
+        WHERE datname IS NOT NULL 
+        GROUP BY datname
+      metrics:
+        - database:
+            usage: "LABEL"
+            description: "Database name"
+        - connections:
+            usage: "GAUGE"
+            description: "Number of connections to database"
+    
+    # Métricas de tamaño de tablas
+    pg_table_size:
+      query: |
+        SELECT 
+          schemaname,
+          tablename,
+          pg_total_relation_size(schemaname||'.'||tablename) as size_bytes
+        FROM pg_tables 
+        WHERE schemaname NOT IN ('information_schema', 'pg_catalog')
+      metrics:
+        - schemaname:
+            usage: "LABEL"
+            description: "Schema name"
+        - tablename:
+            usage: "LABEL"
+            description: "Table name"
+        - size_bytes:
+            usage: "GAUGE"
+            description: "Table size in bytes"
+    
+    # Métricas de índices no utilizados
+    pg_unused_indexes:
+      query: |
+        SELECT 
+          schemaname,
+          tablename,
+          indexname,
+          idx_scan
+        FROM pg_stat_user_indexes 
+        WHERE idx_scan = 0
+      metrics:
+        - schemaname:
+            usage: "LABEL"
+            description: "Schema name"
+        - tablename:
+            usage: "LABEL"
+            description: "Table name"
+        - indexname:
+            usage: "LABEL"
+            description: "Index name"
+        - idx_scan:
+            usage: "GAUGE"
+            description: "Number of index scans"
+    
+    # Métricas de bloqueos
+    pg_locks:
+      query: |
+        SELECT 
+          mode,
+          count(*) as locks_count
+        FROM pg_locks 
+        GROUP BY mode
+      metrics:
+        - mode:
+            usage: "LABEL"
+            description: "Lock mode"
+        - locks_count:
+            usage: "GAUGE"
+            description: "Number of locks"
+
+---
+# ===========================================
+# PersistentVolumeClaim para PostgreSQL
+# ===========================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: database
+  annotations:
+    description: "Almacenamiento persistente para datos de PostgreSQL"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  
+  resources:
+    requests:
+      storage: 50Gi
+  
+  # Clase de almacenamiento (ajustar según el proveedor)
+  storageClassName: fast-ssd  # gp2 para AWS, managed-premium para Azure
+
+---
+# ===========================================
+# Service para PostgreSQL
+# ===========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: database
+  annotations:
+    description: "Service para PostgreSQL database"
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9187"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  
+  selector:
+    app: postgres
+    component: database
+  
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+    
+    - name: metrics
+      port: 9187
+      targetPort: metrics
+      protocol: TCP
+  
+  sessionAffinity: None
+
+---
+# ===========================================
+# ServiceMonitor para métricas de PostgreSQL
+# ===========================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: postgres-servicemonitor
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: postgres
+  
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+      scrapeTimeout: 10s
+
+---
+# ===========================================
+# PrometheusRule para alertas de PostgreSQL
+# ===========================================
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: postgres-alerts
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: alerting
+spec:
+  groups:
+    - name: postgres-alerts
+      interval: 30s
+      rules:
+        # Alerta cuando PostgreSQL está caído
+        - alert: PostgreSQLDown
+          expr: |
+            up{job="postgres-service"} == 0
+          for: 1m
+          labels:
+            severity: critical
+            component: database
+          annotations:
+            summary: "PostgreSQL está caído"
+            description: "PostgreSQL no está respondiendo en el namespace {{ $labels.namespace }}"
+        
+        # Alerta cuando hay muchas conexiones
+        - alert: PostgreSQLHighConnections
+          expr: |
+            pg_stat_database_numbackends / pg_settings_max_connections * 100 > 80
+          for: 5m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "Muchas conexiones a PostgreSQL"
+            description: "PostgreSQL está usando {{ $value }}% de las conexiones máximas"
+        
+        # Alerta cuando el espacio en disco es bajo
+        - alert: PostgreSQLLowDiskSpace
+          expr: |
+            (pg_database_size_bytes / (1024*1024*1024)) > 40
+          for: 5m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "Poco espacio en disco para PostgreSQL"
+            description: "La base de datos está usando {{ $value }}GB de espacio"
+        
+        # Alerta cuando hay bloqueos largos
+        - alert: PostgreSQLLongRunningQueries
+          expr: |
+            pg_stat_activity_max_tx_duration > 300
+          for: 2m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "Consultas de larga duración en PostgreSQL"
+            description: "Hay consultas ejecutándose por más de 5 minutos"
+
+---
+# ===========================================
+# NetworkPolicy para PostgreSQL
+# ===========================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-network-policy
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: security
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  
+  policyTypes:
+    - Ingress
+    - Egress
+  
+  ingress:
+    # Permitir conexiones desde MCP Server
+    - from:
+        - podSelector:
+            matchLabels:
+              app: mcp-server-ai
+      ports:
+        - protocol: TCP
+          port: 5432
+    
+    # Permitir scraping de métricas desde Prometheus
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 9187
+  
+  egress:
+    # Permitir DNS
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

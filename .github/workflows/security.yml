@@ -1,0 +1,390 @@
+# ===========================================
+# Pipeline de Seguridad para MCP Server AI
+# GitHub Actions - Análisis de Seguridad Continuo
+# ===========================================
+name: Security Scan
+
+on:
+  # Ejecutar en push a main y develop
+  push:
+    branches: [ main, develop ]
+  
+  # Ejecutar en pull requests
+  pull_request:
+    branches: [ main, develop ]
+  
+  # Ejecutar semanalmente (domingos a las 2 AM UTC)
+  schedule:
+    - cron: '0 2 * * 0'
+  
+  # Permitir ejecución manual
+  workflow_dispatch:
+
+# Variables de entorno
+env:
+  GO_VERSION: '1.23'
+
+# Permisos necesarios
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # ===========================================
+  # Job 1: Análisis de código con CodeQL
+  # ===========================================
+  codeql:
+    name: 🔍 CodeQL Analysis
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'go' ]
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Inicializar CodeQL
+      - name: 🔧 Inicializar CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+      
+      # Configurar Go
+      - name: 🔧 Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      
+      # Build automático
+      - name: 🏗️ Autobuild
+        uses: github/codeql-action/autobuild@v3
+      
+      # Ejecutar análisis CodeQL
+      - name: 🔍 Ejecutar análisis CodeQL
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{matrix.language}}"
+
+  # ===========================================
+  # Job 2: Análisis de dependencias
+  # ===========================================
+  dependency-review:
+    name: 📦 Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Análisis de dependencias
+      - name: 🔍 Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC
+          deny-licenses: GPL-2.0, GPL-3.0, LGPL-2.1, LGPL-3.0
+
+  # ===========================================
+  # Job 3: Escaneo de secretos
+  # ===========================================
+  secret-scan:
+    name: 🔐 Secret Scanning
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      # Escaneo de secretos con TruffleHog
+      - name: 🔍 TruffleHog OSS
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+          extra_args: --debug --only-verified
+
+  # ===========================================
+  # Job 4: Análisis de seguridad con Gosec
+  # ===========================================
+  gosec:
+    name: 🔒 Gosec Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Configurar Go
+      - name: 🔧 Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      
+      # Ejecutar Gosec
+      - name: 🔍 Ejecutar Gosec
+        uses: securecodewarrior/github-action-gosec@master
+        with:
+          args: '-fmt sarif -out gosec-results.sarif ./...'
+      
+      # Subir resultados a GitHub Security
+      - name: 📤 Subir resultados SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: gosec-results.sarif
+
+  # ===========================================
+  # Job 5: Análisis de licencias
+  # ===========================================
+  license-check:
+    name: 📄 License Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Configurar Go
+      - name: 🔧 Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      
+      # Instalar go-licenses
+      - name: 📦 Instalar go-licenses
+        run: go install github.com/google/go-licenses@latest
+      
+      # Verificar licencias
+      - name: 🔍 Verificar licencias
+        run: |
+          go-licenses check ./...
+          go-licenses report ./... > licenses-report.txt
+      
+      # Subir reporte de licencias
+      - name: 📤 Subir reporte de licencias
+        uses: actions/upload-artifact@v4
+        with:
+          name: licenses-report
+          path: licenses-report.txt
+
+  # ===========================================
+  # Job 6: Análisis de vulnerabilidades en Go modules
+  # ===========================================
+  govulncheck:
+    name: 🛡️ Go Vulnerability Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Configurar Go
+      - name: 🔧 Configurar Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      
+      # Instalar govulncheck
+      - name: 📦 Instalar govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      
+      # Ejecutar govulncheck
+      - name: 🔍 Ejecutar govulncheck
+        run: govulncheck ./...
+
+  # ===========================================
+  # Job 7: Análisis de contenedor Docker
+  # ===========================================
+  container-scan:
+    name: 🐳 Container Security Scan
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Build de imagen Docker
+      - name: 🏗️ Build imagen Docker
+        run: |
+          docker build -t mcp-server-security-test .
+      
+      # Escaneo con Trivy
+      - name: 🔍 Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'mcp-server-security-test'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+      
+      # Subir resultados de Trivy
+      - name: 📤 Subir resultados Trivy
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+      
+      # Escaneo con Snyk
+      - name: 🔍 Snyk Container Security
+        uses: snyk/actions/docker@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: mcp-server-security-test
+          args: --severity-threshold=high --file=Dockerfile
+        continue-on-error: true
+
+  # ===========================================
+  # Job 8: Análisis de configuración de Kubernetes
+  # ===========================================
+  k8s-security:
+    name: ☸️ Kubernetes Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Escaneo con Checkov
+      - name: 🔍 Checkov Kubernetes Security
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: deploy/k8s/
+          framework: kubernetes
+          output_format: sarif
+          output_file_path: checkov-k8s-results.sarif
+        continue-on-error: true
+      
+      # Subir resultados de Checkov
+      - name: 📤 Subir resultados Checkov
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-k8s-results.sarif
+      
+      # Escaneo con Kubesec
+      - name: 🔍 Kubesec Security Scan
+        run: |
+          # Instalar kubesec
+          curl -sSX GET "https://api.github.com/repos/controlplaneio/kubesec/releases/latest" \
+            | grep -o '"browser_download_url": "[^"]*kubesec_linux_amd64.tar.gz"' \
+            | grep -o 'https://[^"]*' \
+            | xargs curl -sSL | tar xz
+          
+          # Escanear archivos de Kubernetes
+          for file in deploy/k8s/*.yaml; do
+            if [[ -f "$file" ]]; then
+              echo "Escaneando $file..."
+              ./kubesec scan "$file" || true
+            fi
+          done
+
+  # ===========================================
+  # Job 9: Análisis de Docker Compose
+  # ===========================================
+  docker-compose-security:
+    name: 🐙 Docker Compose Security
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Escaneo de Docker Compose con Checkov
+      - name: 🔍 Checkov Docker Compose
+        uses: bridgecrewio/checkov-action@master
+        with:
+          file: docker-compose.yml,docker-compose.prod.yml
+          framework: docker_compose
+          output_format: sarif
+          output_file_path: checkov-compose-results.sarif
+        continue-on-error: true
+      
+      # Subir resultados
+      - name: 📤 Subir resultados Checkov Compose
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-compose-results.sarif
+
+  # ===========================================
+  # Job 10: Reporte consolidado de seguridad
+  # ===========================================
+  security-report:
+    name: 📊 Security Report
+    runs-on: ubuntu-latest
+    needs: [codeql, gosec, govulncheck, container-scan, k8s-security]
+    if: always()
+    
+    steps:
+      # Checkout del código
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+      
+      # Generar reporte de seguridad
+      - name: 📋 Generar reporte de seguridad
+        run: |
+          echo "# 🔒 Reporte de Seguridad - MCP Server AI" > security-report.md
+          echo "" >> security-report.md
+          echo "**Fecha:** $(date)" >> security-report.md
+          echo "**Commit:** ${{ github.sha }}" >> security-report.md
+          echo "**Branch:** ${{ github.ref_name }}" >> security-report.md
+          echo "" >> security-report.md
+          
+          echo "## 📊 Resumen de Análisis" >> security-report.md
+          echo "" >> security-report.md
+          echo "| Herramienta | Estado |" >> security-report.md
+          echo "|-------------|--------|" >> security-report.md
+          echo "| CodeQL | ${{ needs.codeql.result }} |" >> security-report.md
+          echo "| Gosec | ${{ needs.gosec.result }} |" >> security-report.md
+          echo "| Govulncheck | ${{ needs.govulncheck.result }} |" >> security-report.md
+          echo "| Container Scan | ${{ needs.container-scan.result }} |" >> security-report.md
+          echo "| K8s Security | ${{ needs.k8s-security.result }} |" >> security-report.md
+          echo "" >> security-report.md
+          
+          echo "## 🔗 Enlaces útiles" >> security-report.md
+          echo "" >> security-report.md
+          echo "- [Security Advisories](https://github.com/${{ github.repository }}/security/advisories)" >> security-report.md
+          echo "- [Dependabot Alerts](https://github.com/${{ github.repository }}/security/dependabot)" >> security-report.md
+          echo "- [Code Scanning Alerts](https://github.com/${{ github.repository }}/security/code-scanning)" >> security-report.md
+      
+      # Subir reporte como artifact
+      - name: 📤 Subir reporte
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.md
+      
+      # Comentar en PR si es un pull request
+      - name: 💬 Comentar en PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('security-report.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });

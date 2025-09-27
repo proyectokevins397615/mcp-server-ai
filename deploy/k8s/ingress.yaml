@@ -1,0 +1,304 @@
+# ===========================================
+# Ingress para MCP Server AI
+# Configuración para exposición HTTP/HTTPS con Nginx Ingress Controller
+# ===========================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-server-ingress
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: ingress
+    version: v1.0.0
+  annotations:
+    # ===========================================
+    # Anotaciones generales
+    # ===========================================
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    
+    # ===========================================
+    # Configuración SSL/TLS
+    # ===========================================
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/ssl-protocols: "TLSv1.2 TLSv1.3"
+    nginx.ingress.kubernetes.io/ssl-ciphers: "HIGH:!aNULL:!MD5"
+    
+    # ===========================================
+    # Configuración de proxy
+    # ===========================================
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "on"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    
+    # ===========================================
+    # Configuración de WebSocket
+    # ===========================================
+    nginx.ingress.kubernetes.io/websocket-services: "mcp-server-service"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+    
+    # ===========================================
+    # Configuración de gRPC
+    # ===========================================
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/grpc-backend: "true"
+    
+    # ===========================================
+    # Rate Limiting
+    # ===========================================
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-rpm: "1000"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+    nginx.ingress.kubernetes.io/limit-whitelist: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    
+    # ===========================================
+    # CORS Configuration
+    # ===========================================
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://app.empresa.com,https://admin.empresa.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization,X-User-ID,X-Session-ID"
+    nginx.ingress.kubernetes.io/cors-expose-headers: "Content-Length,Content-Range"
+    nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
+    nginx.ingress.kubernetes.io/cors-max-age: "86400"
+    
+    # ===========================================
+    # Seguridad adicional
+    # ===========================================
+    nginx.ingress.kubernetes.io/server-snippet: |
+      # Headers de seguridad
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';" always;
+      
+      # HSTS (HTTP Strict Transport Security)
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+      
+      # Ocultar versión de Nginx
+      server_tokens off;
+      more_clear_headers Server;
+    
+    # ===========================================
+    # Rewrite rules
+    # ===========================================
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: "true"
+
+spec:
+  # ===========================================
+  # Configuración TLS
+  # ===========================================
+  tls:
+    - hosts:
+        - api.mcp-server.com
+        - api.empresa.com
+      secretName: mcp-server-tls-secret
+    
+    - hosts:
+        - ws.mcp-server.com
+      secretName: mcp-server-ws-tls-secret
+    
+    - hosts:
+        - grpc.mcp-server.com
+      secretName: mcp-server-grpc-tls-secret
+  
+  # ===========================================
+  # Reglas de enrutamiento
+  # ===========================================
+  rules:
+    # Regla para API HTTP/REST
+    - host: api.mcp-server.com
+      http:
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-server-service
+                port:
+                  number: 8090
+          
+          # Health check endpoint
+          - path: /health
+            pathType: Exact
+            backend:
+              service:
+                name: mcp-server-service
+                port:
+                  number: 8090
+          
+          # Metrics endpoint
+          - path: /metrics
+            pathType: Exact
+            backend:
+              service:
+                name: mcp-server-service
+                port:
+                  number: 9090
+    
+    # Regla para WebSocket
+    - host: ws.mcp-server.com
+      http:
+        paths:
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-server-service
+                port:
+                  number: 8091
+    
+    # Regla para gRPC
+    - host: grpc.mcp-server.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-server-service
+                port:
+                  number: 50051
+
+---
+# ===========================================
+# Ingress para ambiente de staging
+# ===========================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-server-ingress-staging
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: ingress
+    environment: staging
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    
+    # Autenticación básica para staging
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: basic-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Staging Environment - Authentication Required"
+spec:
+  tls:
+    - hosts:
+        - staging-api.mcp-server.com
+      secretName: mcp-server-staging-tls-secret
+  
+  rules:
+    - host: staging-api.mcp-server.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-server-service
+                port:
+                  number: 8090
+
+---
+# ===========================================
+# Certificate para TLS con cert-manager
+# ===========================================
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mcp-server-certificate
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: certificate
+spec:
+  secretName: mcp-server-tls-secret
+  
+  # Emisor de certificados (Let's Encrypt)
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+    group: cert-manager.io
+  
+  # Dominios para el certificado
+  dnsNames:
+    - api.mcp-server.com
+    - api.empresa.com
+    - "*.mcp-server.com"
+  
+  # Duración y renovación
+  duration: 2160h  # 90 días
+  renewBefore: 720h  # Renovar 30 días antes de expirar
+  
+  # Configuración de clave privada
+  privateKey:
+    algorithm: RSA
+    encoding: PKCS1
+    size: 4096
+  
+  # Usos del certificado
+  usages:
+    - digital signature
+    - key encipherment
+    - server auth
+    - client auth
+
+---
+# ===========================================
+# ClusterIssuer para Let's Encrypt
+# ===========================================
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+  labels:
+    app: mcp-server-ai
+    component: cert-issuer
+spec:
+  acme:
+    # Servidor de producción de Let's Encrypt
+    server: https://acme-v02.api.letsencrypt.org/directory
+    
+    # Email para notificaciones
+    email: devops@empresa.com
+    
+    # Secret para almacenar la clave privada de la cuenta
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    
+    # Solvers para validación de dominio
+    solvers:
+      # HTTP-01 challenge para dominios específicos
+      - http01:
+          ingress:
+            class: nginx
+        selector:
+          dnsNames:
+            - api.mcp-server.com
+            - api.empresa.com
+      
+      # DNS-01 challenge para wildcards
+      - dns01:
+          cloudflare:
+            email: admin@empresa.com
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+        selector:
+          dnsNames:
+            - "*.mcp-server.com"

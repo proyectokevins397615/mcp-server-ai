@@ -1,0 +1,270 @@
+# ===========================================
+# Service para MCP Server AI
+# Expone los servicios HTTP, WebSocket y gRPC
+# ===========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-service
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: backend
+    version: v1.0.0
+  annotations:
+    description: "Service principal para MCP Server AI"
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+    prometheus.io/path: "/metrics"
+spec:
+  # ===========================================
+  # Tipo de servicio y configuración
+  # ===========================================
+  type: ClusterIP  # Usar LoadBalancer para exposición externa
+  
+  # Selector de pods
+  selector:
+    app: mcp-server-ai
+    component: backend
+  
+  # ===========================================
+  # Puertos expuestos
+  # ===========================================
+  ports:
+    - name: http
+      port: 8090
+      targetPort: http
+      protocol: TCP
+    
+    - name: websocket
+      port: 8091
+      targetPort: websocket
+      protocol: TCP
+    
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      protocol: TCP
+    
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+  
+  # ===========================================
+  # Configuración de sesión
+  # ===========================================
+  sessionAffinity: ClientIP  # Mantener sesiones del mismo cliente en el mismo pod
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800  # 3 horas
+
+---
+# ===========================================
+# Service para exposición externa con LoadBalancer
+# ===========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-lb
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: loadbalancer
+  annotations:
+    description: "LoadBalancer para exposición externa de MCP Server"
+    # Anotaciones para AWS ELB
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    # Anotaciones para Azure
+    service.beta.kubernetes.io/azure-load-balancer-resource-group: "mcp-server-rg"
+    # Anotaciones para GCP
+    cloud.google.com/load-balancer-type: "Internal"
+spec:
+  type: LoadBalancer
+  
+  selector:
+    app: mcp-server-ai
+    component: backend
+  
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8090
+      protocol: TCP
+    
+    - name: websocket
+      port: 8091
+      targetPort: 8091
+      protocol: TCP
+    
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+  
+  # Configuración adicional para LoadBalancer
+  externalTrafficPolicy: Local  # Preservar IP del cliente
+  healthCheckNodePort: 30000
+
+---
+# ===========================================
+# Service para NodePort (alternativa a LoadBalancer)
+# ===========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-nodeport
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: nodeport
+  annotations:
+    description: "NodePort para acceso directo a los nodos"
+spec:
+  type: NodePort
+  
+  selector:
+    app: mcp-server-ai
+    component: backend
+  
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+      nodePort: 30090
+      protocol: TCP
+    
+    - name: websocket
+      port: 8091
+      targetPort: 8091
+      nodePort: 30091
+      protocol: TCP
+    
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      nodePort: 30051
+      protocol: TCP
+
+---
+# ===========================================
+# Headless Service para descubrimiento de pods
+# ===========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-headless
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: headless
+  annotations:
+    description: "Headless service para descubrimiento directo de pods"
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service
+  
+  selector:
+    app: mcp-server-ai
+    component: backend
+  
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+    
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+
+---
+# ===========================================
+# Service para Redis
+# ===========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: mcp-server
+  labels:
+    app: redis
+    component: cache
+  annotations:
+    description: "Service para Redis cache"
+spec:
+  type: ClusterIP
+  
+  selector:
+    app: redis
+    component: cache
+  
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+
+---
+# ===========================================
+# Service para PostgreSQL
+# ===========================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: mcp-server
+  labels:
+    app: postgres
+    component: database
+  annotations:
+    description: "Service para PostgreSQL database"
+spec:
+  type: ClusterIP
+  
+  selector:
+    app: postgres
+    component: database
+  
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+
+---
+# ===========================================
+# Service Monitor para Prometheus (si se usa Prometheus Operator)
+# ===========================================
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mcp-server-monitor
+  namespace: mcp-server
+  labels:
+    app: mcp-server-ai
+    component: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: mcp-server-ai
+  
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+      
+      # Configuración de métricas
+      metricRelabelings:
+        - sourceLabels: [__name__]
+          regex: 'go_.*'
+          action: drop  # Eliminar métricas de Go no necesarias
+      
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace

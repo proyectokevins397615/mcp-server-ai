@@ -1,0 +1,15 @@
+# ===========================================
+# Namespace para MCP Server AI
+# ===========================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp-server
+  labels:
+    name: mcp-server
+    environment: production
+    app: mcp-server-ai
+  annotations:
+    description: "Namespace para el servicio MCP Server AI"
+    owner: "equipo-devops"
+    contact: "devops@empresa.com"

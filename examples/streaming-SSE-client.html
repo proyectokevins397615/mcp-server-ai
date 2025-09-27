@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Server AI - Cliente de Streaming SSE</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 10px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #555;
+            font-weight: 600;
+        }
+        input, select, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        input:focus, select:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #response {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 5px;
+            min-height: 200px;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            border: 2px solid #e9ecef;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: 600;
+        }
+        .status.connecting {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .stats {
+            margin-top: 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            border: 2px solid #e9ecef;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+        .streaming-indicator {
+            display: inline-block;
+            margin-left: 10px;
+        }
+        .streaming-indicator span {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #667eea;
+            margin: 0 2px;
+            animation: pulse 1.4s infinite;
+        }
+        .streaming-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+        .streaming-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+        @keyframes pulse {
+            0%, 60%, 100% {
+                transform: scale(1);
+                opacity: 1;
+            }
+            30% {
+                transform: scale(1.5);
+                opacity: 0.7;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 MCP Server AI - Cliente de Streaming SSE</h1>
+        
+        <div class="form-group">
+            <label for="model">Modelo:</label>
+            <select id="model">
+                <option value="gpt-4.1">GPT-4.1</option>
+                <option value="gpt-4o">GPT-4o</option>
+                <option value="gpt-5-chat">GPT-5 Chat</option>
+                <option value="grok-3" selected>Grok-3</option>
+                <option value="DeepSeek-R1">DeepSeek-R1</option>
+                <option value="DeepSeek-V3-0324">DeepSeek-V3</option>
+                <option value="o4-mini">O4 Mini</option>
+                <option value="Llama-3.3-70B-Instruct">Llama 3.3 70B</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="provider">Proveedor:</label>
+            <select id="provider">
+                <option value="azure" selected>Azure OpenAI</option>
+                <option value="aws">AWS Bedrock</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="systemPrompt">System Prompt:</label>
+            <textarea id="systemPrompt" placeholder="Eres un asistente útil...">Eres un asistente útil y amigable.</textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="prompt">Prompt:</label>
+            <textarea id="prompt" placeholder="Escribe tu pregunta aquí...">Cuéntame un chiste corto</textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="maxTokens">Max Tokens:</label>
+            <input type="number" id="maxTokens" value="500" min="1" max="4000">
+        </div>
+
+        <div class="form-group">
+            <label for="temperature">Temperature:</label>
+            <input type="number" id="temperature" value="0.7" min="0" max="2" step="0.1">
+        </div>
+
+        <button onclick="startStreaming()" id="streamBtn">
+            🎯 Iniciar Streaming
+        </button>
+        <button onclick="stopStreaming()" id="stopBtn" style="display:none; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
+            ⏹️ Detener
+        </button>
+
+        <div id="status" class="status" style="display:none;"></div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="chunkCount">0</div>
+                <div class="stat-label">Chunks Recibidos</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="charCount">0</div>
+                <div class="stat-label">Caracteres</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="timeElapsed">0s</div>
+                <div class="stat-label">Tiempo</div>
+            </div>
+        </div>
+
+        <div id="response">
+            <div style="color: #6c757d; text-align: center; margin-top: 50px;">
+                La respuesta aparecerá aquí...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let startTime = null;
+        let chunkCount = 0;
+        let charCount = 0;
+        let timeInterval = null;
+
+        async function startStreaming() {
+            // Resetear estadísticas
+            chunkCount = 0;
+            charCount = 0;
+            startTime = Date.now();
+            document.getElementById('chunkCount').textContent = '0';
+            document.getElementById('charCount').textContent = '0';
+            document.getElementById('timeElapsed').textContent = '0s';
+            
+            // Limpiar respuesta anterior
+            document.getElementById('response').innerHTML = '';
+            
+            // Obtener valores del formulario
+            const model = document.getElementById('model').value;
+            const provider = document.getElementById('provider').value;
+            const systemPrompt = document.getElementById('systemPrompt').value;
+            const prompt = document.getElementById('prompt').value;
+            const maxTokens = parseInt(document.getElementById('maxTokens').value);
+            const temperature = parseFloat(document.getElementById('temperature').value);
+            
+            // Deshabilitar botón
+            document.getElementById('streamBtn').disabled = true;
+            document.getElementById('streamBtn').style.display = 'none';
+            document.getElementById('stopBtn').style.display = 'inline-block';
+            
+            // Mostrar estado
+            const statusDiv = document.getElementById('status');
+            statusDiv.style.display = 'block';
+            statusDiv.className = 'status connecting';
+            statusDiv.innerHTML = 'Conectando con el servidor... <div class="streaming-indicator"><span></span><span></span><span></span></div>';
+            
+            // Iniciar contador de tiempo
+            timeInterval = setInterval(() => {
+                const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                document.getElementById('timeElapsed').textContent = elapsed + 's';
+            }, 100);
+            
+            try {
+                // Hacer la petición POST para iniciar el streaming
+                const response = await fetch('http://localhost:8090/api/v1/generate/stream', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        model,
+                        provider,
+                        systemPrompt,
+                        prompt,
+                        maxTokens,
+                        temperature
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                statusDiv.className = 'status connected';
+                statusDiv.innerHTML = 'Streaming activo <div class="streaming-indicator"><span></span><span></span><span></span></div>';
+                
+                // Leer el stream usando el API nativo de Streams
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    
+                    if (done) {
+                        break;
+                    }
+                    
+                    buffer += decoder.decode(value, { stream: true });
+                    
+                    // Procesar líneas completas
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // Guardar la última línea incompleta
+                    
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = line.slice(6);
+                            if (data.trim()) {
+                                try {
+                                    const chunk = JSON.parse(data);
+                                    handleChunk(chunk);
+                                } catch (e) {
+                                    console.error('Error parsing chunk:', e);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                statusDiv.className = 'status connected';
+                statusDiv.innerHTML = '✅ Streaming completado';
+                
+            } catch (error) {
+                console.error('Error:', error);
+                statusDiv.className = 'status error';
+                statusDiv.innerHTML = '❌ Error: ' + error.message;
+                document.getElementById('response').innerHTML = '<span style="color: red;">Error: ' + error.message + '</span>';
+            } finally {
+                // Rehabilitar botón
+                document.getElementById('streamBtn').disabled = false;
+                document.getElementById('streamBtn').style.display = 'inline-block';
+                document.getElementById('stopBtn').style.display = 'none';
+                clearInterval(timeInterval);
+            }
+        }
+        
+        function handleChunk(chunk) {
+            chunkCount++;
+            document.getElementById('chunkCount').textContent = chunkCount;
+            
+            if (chunk.content) {
+                // Agregar contenido al response
+                const responseDiv = document.getElementById('response');
+                responseDiv.innerHTML += chunk.content;
+                
+                // Actualizar contador de caracteres
+                charCount += chunk.content.length;
+                document.getElementById('charCount').textContent = charCount;
+                
+                // Auto-scroll
+                responseDiv.scrollTop = responseDiv.scrollHeight;
+            }
+            
+            if (chunk.finished) {
+                console.log('Stream finished');
+            }
+        }
+        
+        function stopStreaming() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+            
+            document.getElementById('streamBtn').disabled = false;
+            document.getElementById('streamBtn').style.display = 'inline-block';
+            document.getElementById('stopBtn').style.display = 'none';
+            
+            const statusDiv = document.getElementById('status');
+            statusDiv.className = 'status error';
+            statusDiv.innerHTML = '⏹️ Streaming detenido por el usuario';
+            
+            clearInterval(timeInterval);
+        }
+    </script>
+</body>
+</html>
