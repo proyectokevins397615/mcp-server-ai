@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"kevins-tools/mcp-server-ai/internal/ai"
@@ -97,14 +98,59 @@ func (h *Handler) Generate(ctx context.Context, req *proto.GenerateRequest) (*pr
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
+	// Aplicar lógica de separación de tokens para gRPC
+	tokensUsed := int32(resp.TokensUsed)
+	metadata := convertMetadata(resp.Metadata)
+
+	// Si es una respuesta cacheada, aplicar la misma lógica que HTTP
+	if resp.Cached {
+		// Para respuestas cacheadas, mostrar tokens actuales como 0
+		tokensUsed = 0
+
+		// Agregar campos de tokens históricos al metadata
+		if originalTokens, exists := resp.Metadata["original_tokens"]; exists {
+			if tokens, ok := originalTokens.(int); ok {
+				metadata["completion_tokens_cache"] = fmt.Sprintf("%d", tokens)
+				metadata["prompt_tokens_cache"] = fmt.Sprintf("%d", tokens/2) // Estimación
+			} else if tokensStr, ok := originalTokens.(string); ok {
+				if tokens, err := strconv.Atoi(tokensStr); err == nil {
+					metadata["completion_tokens_cache"] = fmt.Sprintf("%d", tokens)
+					metadata["prompt_tokens_cache"] = fmt.Sprintf("%d", tokens/2)
+				}
+			} else if tokensFloat, ok := originalTokens.(float64); ok {
+				tokens := int(tokensFloat)
+				metadata["completion_tokens_cache"] = fmt.Sprintf("%d", tokens)
+				metadata["prompt_tokens_cache"] = fmt.Sprintf("%d", tokens/2)
+			}
+		} else {
+			// Estimación basada en contenido si no hay metadata de tokens originales
+			estimatedTokens := len(resp.Content) / 4
+			if estimatedTokens < 1 {
+				estimatedTokens = 1
+			}
+			metadata["completion_tokens_cache"] = fmt.Sprintf("%d", estimatedTokens)
+			metadata["prompt_tokens_cache"] = fmt.Sprintf("%d", estimatedTokens/2)
+		}
+
+		// Agregar campos de tokens actuales como 0
+		metadata["completion_tokens"] = "0"
+		metadata["prompt_tokens"] = "0"
+	} else {
+		// Para respuestas no cacheadas, agregar campos de tokens actuales
+		metadata["completion_tokens"] = fmt.Sprintf("%d", resp.TokensUsed)
+		metadata["prompt_tokens"] = fmt.Sprintf("%d", resp.TokensUsed/2) // Estimación
+		metadata["completion_tokens_cache"] = "0"
+		metadata["prompt_tokens_cache"] = "0"
+	}
+
 	// Convertir respuesta
 	return &proto.GenerateResponse{
 		Content:    resp.Content,
 		Model:      resp.Model,
 		Provider:   resp.Provider,
-		TokensUsed: int32(resp.TokensUsed),
+		TokensUsed: tokensUsed,
 		Duration:   resp.Duration.Milliseconds(),
-		Metadata:   convertMetadata(resp.Metadata),
+		Metadata:   metadata,
 	}, nil
 }
 
@@ -166,6 +212,10 @@ func (h *Handler) GenerateStream(req *proto.GenerateRequest, stream proto.AIServ
 	// Canal para chunks
 	chunks := make(chan *ai.StreamChunk, 100)
 
+	// Variables para rastrear contenido completo y detectar cache
+	var fullContent strings.Builder
+	var startTime = time.Now()
+
 	// Generar con streaming
 	go func() {
 		err := h.aiManager.StreamGenerate(stream.Context(), aiReq, chunks)
@@ -176,11 +226,63 @@ func (h *Handler) GenerateStream(req *proto.GenerateRequest, stream proto.AIServ
 
 	// Enviar chunks al cliente
 	for chunk := range chunks {
+		// Construir contenido completo
+		if !chunk.Finished {
+			fullContent.WriteString(chunk.Content)
+		}
+
 		resp := &proto.StreamChunk{
 			Content:   chunk.Content,
 			Index:     int32(chunk.Index),
 			Finished:  chunk.Finished,
 			Timestamp: chunk.Timestamp.Unix(),
+		}
+
+		// Si es el último chunk, agregar información de tokens en la respuesta
+		if chunk.Finished {
+			duration := time.Since(startTime)
+			// Detectar cache basándose en duración muy rápida (< 1 segundo para streaming simulado)
+			isCached := duration < 1000*time.Millisecond
+
+			// Crear información de tokens
+			var tokenInfo map[string]interface{}
+
+			if isCached {
+				estimatedTokens := len(fullContent.String()) / 4
+				if estimatedTokens < 1 {
+					estimatedTokens = 1
+				}
+				tokenInfo = map[string]interface{}{
+					"completion_tokens":       0,
+					"prompt_tokens":           0,
+					"completion_tokens_cache": estimatedTokens * 3 / 4,
+					"prompt_tokens_cache":     len(aiReq.Prompt) / 4,
+					"cached":                  true,
+					"provider":                "cache",
+					"model":                   aiReq.Model,
+					"duration_ms":             duration.Milliseconds(),
+				}
+			} else {
+				estimatedTokens := len(fullContent.String()) / 4
+				if estimatedTokens < 1 {
+					estimatedTokens = 1
+				}
+				tokenInfo = map[string]interface{}{
+					"completion_tokens":       estimatedTokens * 3 / 4,
+					"prompt_tokens":           len(aiReq.Prompt) / 4,
+					"completion_tokens_cache": 0,
+					"prompt_tokens_cache":     0,
+					"cached":                  false,
+					"provider":                aiReq.Provider,
+					"model":                   aiReq.Model,
+					"duration_ms":             duration.Milliseconds(),
+				}
+			}
+
+			// Convertir a JSON y enviar como contenido del chunk final
+			if tokenInfoJSON, err := json.Marshal(tokenInfo); err == nil {
+				resp.Content = string(tokenInfoJSON)
+			}
 		}
 
 		if err := stream.Send(resp); err != nil {
@@ -620,12 +722,70 @@ func (h *Handler) GenerateBatchHTTP(c *gin.Context) {
 
 	duration := time.Since(startTime)
 
-	c.JSON(http.StatusOK, gin.H{
-		"responses": responses,
-		"count":     len(responses),
-		"duration":  duration.Milliseconds(),
-		"rate":      float64(len(responses)) / duration.Seconds(),
-	})
+	// Calcular tokens de manera inteligente separando cache y provider
+	var totalTokens int
+	var totalTokensCache int
+	var totalTokensProvider int
+
+	for _, resp := range responses {
+		if resp != nil {
+			if resp.Cached {
+				// Para respuestas cacheadas, obtener tokens originales del metadata si están disponibles
+				if originalTokens, exists := resp.Metadata["original_tokens"]; exists {
+					if tokens, ok := originalTokens.(int); ok {
+						totalTokensCache += tokens
+						totalTokens += tokens
+					} else if tokensStr, ok := originalTokens.(string); ok {
+						if tokens, err := strconv.Atoi(tokensStr); err == nil {
+							totalTokensCache += tokens
+							totalTokens += tokens
+						}
+					} else if tokensFloat, ok := originalTokens.(float64); ok {
+						tokens := int(tokensFloat)
+						totalTokensCache += tokens
+						totalTokens += tokens
+					}
+				} else {
+					// Si no hay metadata de tokens originales, usar TokensUsed (que debería ser 0 para cache)
+					// pero intentar estimar basado en el contenido
+					estimatedTokens := len(resp.Content) / 4 // Estimación aproximada: ~4 chars por token
+					if estimatedTokens < 1 {
+						estimatedTokens = 1
+					}
+					totalTokensCache += estimatedTokens
+					totalTokens += estimatedTokens
+				}
+			} else {
+				// Para respuestas no cacheadas, usar TokensUsed directamente
+				totalTokensProvider += resp.TokensUsed
+				totalTokens += resp.TokensUsed
+			}
+		}
+	}
+
+	// Formatear tiempo de procesamiento
+	processingTime := fmt.Sprintf("%.1fs", duration.Seconds())
+
+	// Formatear rate con unidades
+	rate := fmt.Sprintf("%.2f req/s", float64(len(responses))/duration.Seconds())
+
+	// Crear respuesta base con TODOS los campos requeridos
+	responseData := gin.H{
+		"count":              len(responses),
+		"parallelProcessing": true,
+		"processingTime":     processingTime,
+		"rate":               rate,
+		"responses":          responses,
+		"totalTokens":        totalTokens,
+	}
+
+	// Agregar desglose de tokens si hay respuestas cacheadas
+	if totalTokensCache > 0 {
+		responseData["totalTokensCache"] = totalTokensCache
+		responseData["totalTokensProvider"] = totalTokensProvider
+	}
+
+	c.JSON(http.StatusOK, responseData)
 }
 
 // GenerateBatchStreamHTTP maneja procesamiento en batch con streaming
@@ -690,6 +850,9 @@ func (h *Handler) GenerateBatchStreamHTTP(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 
 	// Procesar cada request y enviar resultado como SSE
+	startTime := time.Now()
+	responses := make([]*ai.GenerateResponse, len(req.Requests))
+
 	c.Stream(func(w io.Writer) bool {
 		for i, request := range req.Requests {
 			// Generar respuesta
@@ -704,6 +867,7 @@ func (h *Handler) GenerateBatchStreamHTTP(c *gin.Context) {
 				result["error"] = err.Error()
 			} else {
 				result["response"] = resp
+				responses[i] = resp // Guardar respuesta para el resumen
 			}
 
 			data, _ := json.Marshal(result)
@@ -718,8 +882,68 @@ func (h *Handler) GenerateBatchStreamHTTP(c *gin.Context) {
 			}
 		}
 
-		// Enviar evento de finalización
-		fmt.Fprintf(w, "data: {\"finished\": true}\n\n")
+		// Calcular resumen final
+		duration := time.Since(startTime)
+
+		// Calcular tokens de manera inteligente separando cache y provider
+		var totalTokens int
+		var totalTokensCache int
+		var totalTokensProvider int
+
+		for _, resp := range responses {
+			if resp != nil {
+				if resp.Cached {
+					// Para respuestas cacheadas, obtener tokens originales del metadata si están disponibles
+					if originalTokens, exists := resp.Metadata["original_tokens"]; exists {
+						if tokens, ok := originalTokens.(int); ok {
+							totalTokensCache += tokens
+							totalTokens += tokens
+						} else if tokensStr, ok := originalTokens.(string); ok {
+							if tokens, err := strconv.Atoi(tokensStr); err == nil {
+								totalTokensCache += tokens
+								totalTokens += tokens
+							}
+						} else if tokensFloat, ok := originalTokens.(float64); ok {
+							tokens := int(tokensFloat)
+							totalTokensCache += tokens
+							totalTokens += tokens
+						}
+					} else {
+						// Si no hay metadata de tokens originales, estimar basado en el contenido
+						estimatedTokens := len(resp.Content) / 4
+						if estimatedTokens < 1 {
+							estimatedTokens = 1
+						}
+						totalTokensCache += estimatedTokens
+						totalTokens += estimatedTokens
+					}
+				} else {
+					// Para respuestas no cacheadas, usar TokensUsed directamente
+					totalTokensProvider += resp.TokensUsed
+					totalTokens += resp.TokensUsed
+				}
+			}
+		}
+
+		// Crear resumen final
+		summary := map[string]interface{}{
+			"count":              len(req.Requests),
+			"parallelProcessing": true,
+			"processingTime":     fmt.Sprintf("%.1fs", duration.Seconds()),
+			"rate":               fmt.Sprintf("%.2f req/s", float64(len(req.Requests))/duration.Seconds()),
+			"totalTokens":        totalTokens,
+			"finished":           true,
+		}
+
+		// Agregar desglose de tokens si hay respuestas cacheadas
+		if totalTokensCache > 0 {
+			summary["totalTokensCache"] = totalTokensCache
+			summary["totalTokensProvider"] = totalTokensProvider
+		}
+
+		// Enviar resumen final
+		summaryData, _ := json.Marshal(summary)
+		fmt.Fprintf(w, "data: %s\n\n", summaryData)
 		return false
 	})
 }

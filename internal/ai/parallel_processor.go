@@ -203,8 +203,9 @@ func (p *ParallelProcessor) ProcessBatch(ctx context.Context, requests []*Genera
 	responses := make([]*GenerateResponse, batchSize)
 	errors := make([]error, batchSize)
 
-	// Usar errgroup para control de errores
-	g, ctx := errgroup.WithContext(ctx)
+	// Usar WaitGroup en lugar de errgroup para no cancelar todo el batch por un error
+	var wg sync.WaitGroup
+	wg.Add(batchSize)
 
 	// Crear y enviar tareas al pool
 	tasks := make([]pool.Task, batchSize)
@@ -226,19 +227,40 @@ func (p *ParallelProcessor) ProcessBatch(ctx context.Context, requests []*Genera
 
 		tasks[idx] = task
 
-		// Goroutine para recolectar resultados
-		g.Go(func() error {
+		// Goroutine para recolectar resultados - NO cancelar por errores individuales
+		go func(index int) {
+			defer wg.Done()
+
 			select {
 			case resp := <-respChan:
-				responses[idx] = resp
-				return nil
+				responses[index] = resp
 			case err := <-errChan:
-				errors[idx] = err
-				return err
+				errors[index] = err
+				// Crear respuesta con error para mantener consistencia en el índice
+				responses[index] = &GenerateResponse{
+					Content:  "",
+					Model:    req.Model,
+					Provider: req.Provider,
+					Cached:   false,
+					Metadata: map[string]interface{}{
+						"error": err.Error(),
+						"index": index,
+					},
+				}
 			case <-ctx.Done():
-				return ctx.Err()
+				errors[index] = ctx.Err()
+				responses[index] = &GenerateResponse{
+					Content:  "",
+					Model:    req.Model,
+					Provider: req.Provider,
+					Cached:   false,
+					Metadata: map[string]interface{}{
+						"error": ctx.Err().Error(),
+						"index": index,
+					},
+				}
 			}
-		})
+		}(idx)
 	}
 
 	// Enviar todas las tareas al pool
@@ -247,29 +269,31 @@ func (p *ParallelProcessor) ProcessBatch(ctx context.Context, requests []*Genera
 	}
 
 	// Esperar a que todas las tareas terminen
-	err := g.Wait()
+	wg.Wait()
 
-	// Verificar si hubo errores
-	if err != nil {
-		// Recolectar todos los errores
-		var failedCount int
-		for _, e := range errors {
-			if e != nil {
-				failedCount++
-			}
+	// Contar errores y respuestas exitosas
+	var failedCount int
+	var successCount int
+	for i, err := range errors {
+		if err != nil {
+			failedCount++
+			p.logger.Warn("Task failed in batch",
+				zap.Int("task_index", i),
+				zap.Error(err),
+				zap.String("model", requests[i].Model),
+				zap.String("provider", requests[i].Provider))
+		} else if responses[i] != nil && responses[i].Content != "" {
+			successCount++
 		}
-		p.logger.Error("Batch processing failed",
-			zap.Error(err),
-			zap.Int("failed_tasks", failedCount),
-			zap.Int("total_tasks", batchSize))
-
-		// Devolver respuestas parciales si las hay
-		return responses, fmt.Errorf("batch processing failed: %d/%d tasks failed", failedCount, batchSize)
 	}
 
 	p.logger.Info("Batch processing completed",
-		zap.Int("batch_size", batchSize))
+		zap.Int("batch_size", batchSize),
+		zap.Int("successful", successCount),
+		zap.Int("failed", failedCount))
 
+	// Siempre devolver las respuestas, incluso si algunas fallaron
+	// El cliente puede verificar el campo metadata.error para detectar fallos
 	return responses, nil
 }
 
